@@ -1,0 +1,79 @@
+{
+  "issue": 32,
+  "name": "relp_region_student_apples_enpt",
+  "objective": "Run an apples-to-apples EN->PT comparison where the low-rank region-student contract uses the same ReLP mask discovery and FLORES/NTREX data pipeline as the strongest prior EN->PT approach.",
+  "why": {
+    "problem": "Issue 31 mixed three variables: ACDC mask discovery, DataDesigner-derived training data, and the low-rank region-student implementation. The follow-up original-region control showed the ACDC 160k region is capable, but it did not normalize mask discovery or data construction against the strongest prior method.",
+    "fixed_comparison": "Use the #23/#28 ReLP + FLORES teacher-hyp + NTREX held-out pipeline, then change only the student-region implementation contract."
+  },
+  "references": {
+    "issue": "issues/32",
+    "prior_winner_issue": "issues/28",
+    "prior_winner_xcomet": 0.8121489377,
+    "prior_winner_condition": "k=160000 ReLP fixed mask, r8 LoRA lens, NTREX EN->PT XCOMET-XXL",
+    "teacher_reference_xcomet": 0.9283224267980797,
+    "issue31_original_region_control_xcomet": 0.7543544717769879,
+    "issue31_best_region_student_xcomet": 0.1784267
+  },
+  "model": {
+    "teacher": "tencent/HY-MT1.5-1.8B",
+    "prompt_style": "hy_mt",
+    "target_language": "Portuguese",
+    "src_lang": "eng_Latn",
+    "tgt_lang": "por_Latn"
+  },
+  "data": {
+    "train_source": "FLORES EN->PT devtest JSONL translated by unmasked HY-MT into model_hyp targets",
+    "attribution_source": "FLORES EN->PT dev split sampled by attribute_translation.py",
+    "heldout_eval": "NTREX EN->PT test split truncated to 1012 rows",
+    "heldout_policy": "NTREX must not be used for training, attribution, or mask selection",
+    "synthetic_data_policy": "Do not use issue30/DataDesigner synthetic data for the first apples-to-apples comparison"
+  },
+  "region_discovery": {
+    "method": "ReLP translation attribution from the prior fixed-mask pipeline",
+    "script": "attribute_translation.py",
+    "metric": "first_token_logit",
+    "n_attr": 200,
+    "budget_k": 160000,
+    "mask_file": "relp_k160000.full.npz",
+    "forbidden_first_pass": "ACDC"
+  },
+  "intervention": {
+    "type": "MLP down_proj-input mean ablation",
+    "selected_region": "kept live per-example signal",
+    "complement": "replace with calibration-set mean",
+    "evaluation_script": "evaluate_translation_masks.py"
+  },
+  "student_region": {
+    "script": "train_region_student_translation.py",
+    "initial_rank": 128,
+    "rank_policy": "Start with the best #31-style anchor rank first; expand only if the first result is not clearly negative.",
+    "teacher": "unmasked HY-MT logits on FLORES teacher-hyp rows",
+    "training_data": "same FLORES teacher-hyp rows used by the prior fixed-mask pipeline",
+    "loss": {
+      "masked_kl_beta": 1.0,
+      "ce_beta": 0.2,
+      "activation_match_beta": 0.0
+    }
+  },
+  "minimum_run": [
+    "Build or restore FLORES teacher-hyp train data.",
+    "Build or restore NTREX held-out eval data.",
+    "Build or restore ReLP relp_k160000.full.npz.",
+    "Evaluate teacher/no-mask and ReLP k=160k original-region control.",
+    "Train one region-student at rank 128 using the same ReLP mask and FLORES teacher-hyp data.",
+    "Evaluate the region-student on NTREX and score with XCOMET-XXL.",
+    "Post the comparison table before expanding."
+  ],
+  "interpretation": {
+    "student_still_weak": "If the region student remains far below the ReLP original-region control, the region-student contract is the dominant failure.",
+    "student_recovers": "If the region student closes most of the gap to original-region control, issue31 was confounded by ACDC and/or synthetic data choices.",
+    "anchor_fails": "If the ReLP original-region control itself is unexpectedly weak, stop and fix the recreated prior anchor before training students."
+  },
+  "artifact_repos": {
+    "github": "prism-capability-extraction",
+    "dataset_hf": "public-translation-data-source",
+    "circuit_backup_hf": "public-translation-artifact-backup"
+  },
+  "weights_policy": "Do not upload Tencent HY-MT, XCOMET weights, Hugging Face cache directories, API keys, or service tokens."
+}

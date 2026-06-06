@@ -1,0 +1,503 @@
+{
+  "args": {
+    "model": "Qwen/Qwen2.5-Math-1.5B",
+    "out_dir": "results/qwen25_math_1p5b_2digit_max_recovery_v1/lora_r32_beta005",
+    "min": 10,
+    "max": 99,
+    "device": "cuda",
+    "dtype": "bfloat16",
+    "seed": 42,
+    "epochs": 3.0,
+    "batch_size": 16,
+    "grad_accum": 1,
+    "lr": 0.0002,
+    "weight_decay": 0.0,
+    "warmup_ratio": 0.05,
+    "max_grad_norm": 1.0,
+    "lora_r": 32,
+    "lora_alpha": 64,
+    "lora_dropout": 0.0,
+    "target_modules": "all-linear",
+    "use_rslora": true,
+    "kl_beta": 0.05,
+    "kl_temperature": 1.0,
+    "kl_on": "prompt",
+    "include_compact": true,
+    "include_spaced": true,
+    "eval_every": 100,
+    "max_steps": 300,
+    "num_workers": 0
+  },
+  "device": "cuda",
+  "dtype": "bfloat16",
+  "n_examples": 16200,
+  "n_unique_pairs": 8100,
+  "adapter_dir": "results/qwen25_math_1p5b_2digit_max_recovery_v1/lora_r32_beta005/adapter",
+  "total_steps": 300,
+  "warmup_steps": 15,
+  "logs": [
+    {
+      "step": 1,
+      "loss": 2.375,
+      "ce": 2.375,
+      "kl": -0.000293731689453125,
+      "lr": 1.3333333333333333e-05,
+      "elapsed_s": 0.7670843601226807,
+      "compact_exact": {
+        "n": 8100,
+        "correct": 7590,
+        "accuracy": 0.937037037037037,
+        "wrong_sample": [
+          {
+            "prompt": "11 + 13 =",
+            "answer": "24",
+            "pred": "35"
+          },
+          {
+            "prompt": "11 + 21 =",
+            "answer": "32",
+            "pred": "132"
+          },
+          {
+            "prompt": "11 + 31 =",
+            "answer": "42",
+            "pred": "142"
+          },
+          {
+            "prompt": "11 + 41 =",
+            "answer": "52",
+            "pred": "152"
+          },
+          {
+            "prompt": "11 + 47 =",
+            "answer": "58",
+            "pred": "158"
+          },
+          {
+            "prompt": "11 + 48 =",
+            "answer": "59",
+            "pred": "159"
+          },
+          {
+            "prompt": "11 + 49 =",
+            "answer": "60",
+            "pred": "160"
+          },
+          {
+            "prompt": "11 + 50 =",
+            "answer": "61",
+            "pred": "161"
+          },
+          {
+            "prompt": "11 + 51 =",
+            "answer": "62",
+            "pred": "162"
+          },
+          {
+            "prompt": "11 + 53 =",
+            "answer": "64",
+            "pred": "164"
+          },
+          {
+            "prompt": "11 + 57 =",
+            "answer": "68",
+            "pred": "168"
+          },
+          {
+            "prompt": "11 + 58 =",
+            "answer": "69",
+            "pred": "169"
+          },
+          {
+            "prompt": "11 + 59 =",
+            "answer": "70",
+            "pred": "170"
+          },
+          {
+            "prompt": "11 + 61 =",
+            "answer": "72",
+            "pred": "172"
+          },
+          {
+            "prompt": "11 + 62 =",
+            "answer": "73",
+            "pred": "173"
+          },
+          {
+            "prompt": "11 + 67 =",
+            "answer": "78",
+            "pred": "178"
+          },
+          {
+            "prompt": "11 + 68 =",
+            "answer": "79",
+            "pred": "179"
+          },
+          {
+            "prompt": "11 + 69 =",
+            "answer": "80",
+            "pred": "180"
+          },
+          {
+            "prompt": "11 + 70 =",
+            "answer": "81",
+            "pred": "181"
+          },
+          {
+            "prompt": "11 + 71 =",
+            "answer": "82",
+            "pred": "182"
+          },
+          {
+            "prompt": "11 + 75 =",
+            "answer": "86",
+            "pred": "186"
+          },
+          {
+            "prompt": "11 + 76 =",
+            "answer": "87",
+            "pred": "187"
+          },
+          {
+            "prompt": "11 + 78 =",
+            "answer": "89",
+            "pred": "189"
+          },
+          {
+            "prompt": "11 + 79 =",
+            "answer": "90",
+            "pred": "190"
+          },
+          {
+            "prompt": "11 + 80 =",
+            "answer": "91",
+            "pred": "191"
+          }
+        ]
+      }
+    },
+    {
+      "step": 100,
+      "loss": 0.1668096985479798,
+      "ce": 0.14423123754636205,
+      "kl": 0.45214023975410844,
+      "lr": 0.00015922352526649803,
+      "elapsed_s": 68.80163931846619,
+      "compact_exact": {
+        "n": 8100,
+        "correct": 7699,
+        "accuracy": 0.9504938271604938,
+        "wrong_sample": [
+          {
+            "prompt": "10 + 11 =",
+            "answer": "21",
+            "pred": "211"
+          },
+          {
+            "prompt": "10 + 21 =",
+            "answer": "31",
+            "pred": "311"
+          },
+          {
+            "prompt": "10 + 31 =",
+            "answer": "41",
+            "pred": "411"
+          },
+          {
+            "prompt": "10 + 51 =",
+            "answer": "61",
+            "pred": "611"
+          },
+          {
+            "prompt": "10 + 61 =",
+            "answer": "71",
+            "pred": "711"
+          },
+          {
+            "prompt": "10 + 71 =",
+            "answer": "81",
+            "pred": "811"
+          },
+          {
+            "prompt": "10 + 81 =",
+            "answer": "91",
+            "pred": "911"
+          },
+          {
+            "prompt": "10 + 91 =",
+            "answer": "101",
+            "pred": "1011"
+          },
+          {
+            "prompt": "10 + 92 =",
+            "answer": "102",
+            "pred": "1022"
+          },
+          {
+            "prompt": "11 + 10 =",
+            "answer": "21",
+            "pred": "211"
+          },
+          {
+            "prompt": "11 + 39 =",
+            "answer": "50",
+            "pred": "40"
+          },
+          {
+            "prompt": "11 + 60 =",
+            "answer": "71",
+            "pred": "711"
+          },
+          {
+            "prompt": "11 + 80 =",
+            "answer": "91",
+            "pred": "911"
+          },
+          {
+            "prompt": "11 + 83 =",
+            "answer": "94",
+            "pred": "944"
+          },
+          {
+            "prompt": "12 + 19 =",
+            "answer": "31",
+            "pred": "311"
+          },
+          {
+            "prompt": "12 + 29 =",
+            "answer": "41",
+            "pred": "411"
+          },
+          {
+            "prompt": "12 + 49 =",
+            "answer": "61",
+            "pred": "611"
+          },
+          {
+            "prompt": "12 + 59 =",
+            "answer": "71",
+            "pred": "711"
+          },
+          {
+            "prompt": "12 + 69 =",
+            "answer": "81",
+            "pred": "8111"
+          },
+          {
+            "prompt": "12 + 79 =",
+            "answer": "91",
+            "pred": "9111"
+          },
+          {
+            "prompt": "13 + 18 =",
+            "answer": "31",
+            "pred": "311"
+          },
+          {
+            "prompt": "13 + 28 =",
+            "answer": "41",
+            "pred": "411"
+          },
+          {
+            "prompt": "13 + 48 =",
+            "answer": "61",
+            "pred": "611"
+          },
+          {
+            "prompt": "13 + 58 =",
+            "answer": "71",
+            "pred": "711"
+          },
+          {
+            "prompt": "13 + 68 =",
+            "answer": "81",
+            "pred": "8111"
+          }
+        ]
+      }
+    },
+    {
+      "step": 200,
+      "loss": 0.0464599609375,
+      "ce": 0.028288497924804687,
+      "kl": 0.3633984375,
+      "lr": 5.484666416891109e-05,
+      "elapsed_s": 126.16183876991272,
+      "compact_exact": {
+        "n": 8100,
+        "correct": 8015,
+        "accuracy": 0.9895061728395061,
+        "wrong_sample": [
+          {
+            "prompt": "10 + 11 =",
+            "answer": "21",
+            "pred": "211"
+          },
+          {
+            "prompt": "11 + 14 =",
+            "answer": "25",
+            "pred": "255"
+          },
+          {
+            "prompt": "13 + 10 =",
+            "answer": "23",
+            "pred": "233"
+          },
+          {
+            "prompt": "13 + 11 =",
+            "answer": "24",
+            "pred": "244"
+          },
+          {
+            "prompt": "13 + 14 =",
+            "answer": "27",
+            "pred": "277"
+          },
+          {
+            "prompt": "14 + 10 =",
+            "answer": "24",
+            "pred": "244"
+          },
+          {
+            "prompt": "14 + 11 =",
+            "answer": "25",
+            "pred": "255"
+          },
+          {
+            "prompt": "15 + 10 =",
+            "answer": "25",
+            "pred": "255"
+          },
+          {
+            "prompt": "15 + 11 =",
+            "answer": "26",
+            "pred": "266"
+          },
+          {
+            "prompt": "15 + 17 =",
+            "answer": "32",
+            "pred": "322"
+          },
+          {
+            "prompt": "22 + 10 =",
+            "answer": "32",
+            "pred": "322"
+          },
+          {
+            "prompt": "22 + 11 =",
+            "answer": "33",
+            "pred": "333"
+          },
+          {
+            "prompt": "22 + 12 =",
+            "answer": "34",
+            "pred": "344"
+          },
+          {
+            "prompt": "22 + 13 =",
+            "answer": "35",
+            "pred": "355"
+          },
+          {
+            "prompt": "22 + 14 =",
+            "answer": "36",
+            "pred": "366"
+          },
+          {
+            "prompt": "22 + 15 =",
+            "answer": "37",
+            "pred": "377"
+          },
+          {
+            "prompt": "22 + 17 =",
+            "answer": "39",
+            "pred": "399"
+          },
+          {
+            "prompt": "22 + 18 =",
+            "answer": "40",
+            "pred": "300"
+          },
+          {
+            "prompt": "22 + 19 =",
+            "answer": "41",
+            "pred": "411"
+          },
+          {
+            "prompt": "22 + 20 =",
+            "answer": "42",
+            "pred": "422"
+          },
+          {
+            "prompt": "22 + 21 =",
+            "answer": "43",
+            "pred": "433"
+          },
+          {
+            "prompt": "22 + 22 =",
+            "answer": "44",
+            "pred": "444"
+          },
+          {
+            "prompt": "22 + 23 =",
+            "answer": "45",
+            "pred": "455"
+          },
+          {
+            "prompt": "22 + 24 =",
+            "answer": "46",
+            "pred": "466"
+          },
+          {
+            "prompt": "22 + 28 =",
+            "answer": "50",
+            "pred": "40"
+          }
+        ]
+      }
+    },
+    {
+      "step": 300,
+      "loss": 0.021055908203125,
+      "ce": 0.004004974365234375,
+      "kl": 0.340908203125,
+      "lr": 0.0,
+      "elapsed_s": 186.1755006313324,
+      "compact_exact": {
+        "n": 8100,
+        "correct": 8098,
+        "accuracy": 0.9997530864197531,
+        "wrong_sample": [
+          {
+            "prompt": "22 + 10 =",
+            "answer": "32",
+            "pred": "322"
+          },
+          {
+            "prompt": "22 + 11 =",
+            "answer": "33",
+            "pred": "333"
+          }
+        ]
+      }
+    }
+  ],
+  "final_eval": {
+    "n": 8100,
+    "correct": 8098,
+    "accuracy": 0.9997530864197531,
+    "wrong_sample": [
+      {
+        "prompt": "22 + 10 =",
+        "answer": "32",
+        "pred": "322"
+      },
+      {
+        "prompt": "22 + 11 =",
+        "answer": "33",
+        "pred": "333"
+      }
+    ]
+  },
+  "elapsed_s": 265.8986837863922
+}

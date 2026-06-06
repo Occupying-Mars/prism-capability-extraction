@@ -1,0 +1,15 @@
+{
+  "examples": 1007,
+  "exact_correct": 683,
+  "exact_accuracy": 0.6782522343594836,
+  "raw_exact_correct": 666,
+  "raw_exact_accuracy": 0.6613704071499503,
+  "normalized_exact_correct": 683,
+  "normalized_exact_accuracy": 0.6782522343594836,
+  "reported_metric": "normalized_exact",
+  "bfcl_canonicalization_prompt": true,
+  "mask_topk": null,
+  "attribution": null,
+  "generations": "runs/issue49_bfcl_single_call/eval_bfcl10k_topk160000_r32_balanced_len1024_unmasked.jsonl",
+  "note": "crude exact structured match against BFCL simple possible answers"
+}

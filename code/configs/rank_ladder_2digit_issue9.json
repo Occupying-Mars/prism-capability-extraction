@@ -1,0 +1,77 @@
+{
+  "issue": 9,
+  "name": "rank_ladder_2digit_smallest_90_full_answer",
+  "objective": "Find the smallest MLP circuit mask with at least 90% exact 2-digit full-answer recovery by using LoRA rank as an information bottleneck.",
+  "base_model": "Qwen/Qwen2.5-Math-1.5B",
+  "ranks": [16, 8, 4, 2, 1],
+  "reference": {
+    "rank": 32,
+    "autoregressive_exact": 0.9133,
+    "mlp_channels": 12661,
+    "total_model_equivalent_mlp_param_fraction": 0.0378
+  },
+  "training": {
+    "script": "train_lora_2digit_kl.py",
+    "min": 10,
+    "max": 99,
+    "dtype": "bfloat16",
+    "seed": 42,
+    "epochs": 3.0,
+    "batch_size": 16,
+    "grad_accum": 1,
+    "lr": 0.0002,
+    "lora_alpha_multiplier": 2,
+    "lora_dropout": 0.0,
+    "target_modules": "all-linear",
+    "use_rslora": true,
+    "kl_beta": 0.05,
+    "kl_temperature": 1.0,
+    "kl_on": "prompt",
+    "include_compact": true,
+    "include_spaced": true,
+    "eval_every": 100,
+    "max_steps": 300
+  },
+  "merge_sweep": {
+    "script": "merge_lora_kl_sweep.py",
+    "scales": "0.45,0.55,0.75,1.0",
+    "min_accuracy": 0.995,
+    "kl_on": "all",
+    "kl_examples": 2048,
+    "batch_size": 256,
+    "kl_batch_size": 32,
+    "selection_rule": "lowest KL among scales at or above min_accuracy; otherwise max accuracy"
+  },
+  "position_tracing": {
+    "script": "position_interface_decomposition.py",
+    "positions": ["hundreds", "tens", "ones"],
+    "n_per_position": 4000,
+    "n_prune_test": 500,
+    "seed": 42,
+    "two_digit_leading_carry": true,
+    "multi_gpu": true,
+    "heads": "keep all"
+  },
+  "direct_search": {
+    "script": "full_answer_group_search.py",
+    "target_accuracy": 0.9,
+    "base_mask": "topk_500",
+    "baseline_masks": ["topk_100", "rel_0.05", "topk_500", "rel_0.01", "topk_2000", "rel_0.001"],
+    "shells": ["rel_0.01:topk_500", "topk_2000:topk_500", "rel_0.001:topk_500"],
+    "num_shards": 4,
+    "max_greedy_candidates": 32,
+    "max_forward_steps": 12
+  },
+  "fresh_validation": {
+    "scripts": ["position_interface_decomposition.py", "evaluate_full_answer_masks.py", "evaluate_full_answer_generation_masks.py"],
+    "seed": 123,
+    "n_per_position": 4000,
+    "n_prune_test": 500,
+    "target_accuracy": 0.9
+  },
+  "reporting": {
+    "issue_comments": true,
+    "atomic_commits": true,
+    "docs": ["BRANCH_EXPERIMENT_REPORT.md", "RESULTS.md", "FULL_ANSWER_CIRCUIT_EXTRACTION_REPORT.md"]
+  }
+}

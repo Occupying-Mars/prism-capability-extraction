@@ -1,0 +1,154 @@
+{
+  "run_root": "<translation-run-root>",
+  "k": 120000,
+  "metric_note": "XCOMET/GEMBA unavailable in this run; chrF++/chrF/BLEU are cheap generation metrics.",
+  "rows": [
+    {
+      "rank": "base",
+      "trainable_params": 0,
+      "no_mask": {
+        "chrFpp": 54.25927657553863,
+        "chrF": 56.952507802193566,
+        "BLEU": 25.829122478683136,
+        "n": 1012
+      },
+      "masked": {
+        "chrFpp": 26.663512900825882,
+        "chrF": 30.155382881450077,
+        "BLEU": 3.8443314268827207,
+        "n": 1012
+      },
+      "gain_chrFpp_over_base_mask": 0.0
+    },
+    {
+      "rank": "4",
+      "trainable_params": "rank 4, alpha 8",
+      "final_train": {
+        "step": 64,
+        "loss": 1.4698486328125,
+        "masked_kl": 1.2008056640625,
+        "ce": 1.3341064453125,
+        "unmasked_kl": 0.06040191650390625,
+        "lr": 0.0,
+        "elapsed_s": 187.52512073516846
+      },
+      "no_mask": {
+        "chrFpp": 54.30195429878354,
+        "chrF": 56.98522052622481,
+        "BLEU": 26.006597878977352,
+        "n": 1012
+      },
+      "masked": {
+        "chrFpp": 38.9712545388394,
+        "chrF": 41.91340190732972,
+        "BLEU": 10.36565127906602,
+        "n": 1012
+      },
+      "gain_chrFpp_over_base_mask": 12.307741638013521
+    },
+    {
+      "rank": "8",
+      "trainable_params": "rank 8, alpha 16",
+      "final_train": {
+        "step": 64,
+        "loss": 1.340087890625,
+        "masked_kl": 1.0924072265625,
+        "ce": 1.2279052734375,
+        "unmasked_kl": 0.06329154968261719,
+        "lr": 0.0,
+        "elapsed_s": 185.14231610298157
+      },
+      "no_mask": {
+        "chrFpp": 54.05787970841898,
+        "chrF": 56.78396201291199,
+        "BLEU": 25.841842339872723,
+        "n": 1012
+      },
+      "masked": {
+        "chrFpp": 40.55739050487756,
+        "chrF": 43.4509790222337,
+        "BLEU": 12.296702074488385,
+        "n": 1012
+      },
+      "gain_chrFpp_over_base_mask": 13.893877604051678
+    },
+    {
+      "rank": "16",
+      "trainable_params": "rank 16, alpha 32",
+      "final_train": {
+        "step": 64,
+        "loss": 1.1773681640625,
+        "masked_kl": 0.9556884765625,
+        "ce": 1.09130859375,
+        "unmasked_kl": 0.08013534545898438,
+        "lr": 0.0,
+        "elapsed_s": 186.29944515228271
+      },
+      "no_mask": {
+        "chrFpp": 53.96963718913197,
+        "chrF": 56.685772405727086,
+        "BLEU": 25.91428512551594,
+        "n": 1012
+      },
+      "masked": {
+        "chrFpp": 42.437212134872155,
+        "chrF": 45.2041476878418,
+        "BLEU": 14.309041646627659,
+        "n": 1012
+      },
+      "gain_chrFpp_over_base_mask": 15.773699234046273
+    },
+    {
+      "rank": "r32_anchor",
+      "trainable_params": "rank 32, alpha 64",
+      "final_train": {
+        "step": 64,
+        "loss": 1.1146240234375,
+        "masked_kl": 0.8985595703125,
+        "ce": 1.04437255859375,
+        "unmasked_kl": 0.1420135498046875,
+        "lr": 0.0,
+        "elapsed_s": 185.18512773513794
+      },
+      "no_mask": {
+        "chrFpp": 53.371614485833504,
+        "chrF": 56.14097629080595,
+        "BLEU": 24.4126724100805,
+        "n": 1012
+      },
+      "masked": {
+        "chrFpp": 43.72698893747838,
+        "chrF": 46.537401621132766,
+        "BLEU": 14.904177928802765,
+        "n": 1012
+      },
+      "gain_chrFpp_over_base_mask": 17.0634760366525
+    },
+    {
+      "rank": "64",
+      "trainable_params": "rank 64, alpha 128",
+      "final_train": {
+        "step": 64,
+        "loss": 1.18707275390625,
+        "masked_kl": 0.95379638671875,
+        "ce": 1.08160400390625,
+        "unmasked_kl": 0.317352294921875,
+        "lr": 0.0,
+        "elapsed_s": 189.01786947250366
+      },
+      "no_mask": {
+        "chrFpp": 51.184968472897,
+        "chrF": 54.01824341596283,
+        "BLEU": 22.118362678261118,
+        "n": 1012
+      },
+      "masked": {
+        "chrFpp": 43.45547728228361,
+        "chrF": 46.251062237752166,
+        "BLEU": 14.880657052130575,
+        "n": 1012
+      },
+      "gain_chrFpp_over_base_mask": 16.791964381457728
+    }
+  ]
+}

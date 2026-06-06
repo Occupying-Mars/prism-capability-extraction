@@ -1,0 +1,61 @@
+{
+  "issue": 32,
+  "name": "hy_lora_conditions_artifact_repro",
+  "objective": "Replay the preserved issue #28 EN->PT low-rank lens artifacts and verify the strongest recorded k=160000 result without retraining or regenerating attribution.",
+  "source_artifact_repo": {
+    "repo_id": "public-translation-lora-artifact",
+    "repo_type": "model",
+    "base_model": "tencent/HY-MT1.5-1.8B",
+    "manifest": "manifest.json",
+    "available_issue28_conditions": [
+      {
+        "condition": "r2",
+        "adapter": "low_rank_lens/k160_r2/adapter",
+        "mask": "masks/base_attr/relp_k160000.full.npz",
+        "recorded_issue28_xcomet": 0.7655800197
+      },
+      {
+        "condition": "r8",
+        "adapter": "low_rank_lens/k160_r8/adapter",
+        "mask": "masks/base_attr/relp_k160000.full.npz",
+        "recorded_issue28_xcomet": 0.8121489377
+      }
+    ],
+    "known_missing_from_manifest": [
+      "low_rank_lens/k160_r4"
+    ]
+  },
+  "eval": {
+    "heldout_eval": "NTREX EN->PT, 1012 rows",
+    "judge": "Unbabel/XCOMET-XXL",
+    "decode": "greedy generation, max_new_tokens=384",
+    "intervention": "mean ablation at MLP down_proj input using the preserved relp_k160000.full.npz mask",
+    "base_condition": "tencent/HY-MT1.5-1.8B under preserved relp_k160000 mask",
+    "adapter_conditions": "base HY-MT plus preserved PEFT adapter merged in memory, then evaluated under the preserved relp_k160000 mask"
+  },
+  "expected_recorded_scores": {
+    "base_fixed_k160000": 0.6300551002,
+    "r2_fixed_k160000": 0.7655800197,
+    "r4_fixed_k160000": 0.7979727848,
+    "r8_fixed_k160000": 0.8121489377
+  },
+  "artifact_policy": {
+    "primary_upload_repo": "public-translation-data-source",
+    "mirror_upload_repo": "public-translation-artifact-backup",
+    "include": [
+      "source artifact manifest/config/train summaries",
+      "preserved PEFT adapters and ReLP mask used for replay",
+      "NTREX hypothesis dumps",
+      "XCOMET summaries and scored pools",
+      "logs and checksums"
+    ],
+    "exclude": [
+      "upstream HY-MT weights",
+      "XCOMET weights",
+      "Hugging Face cache directories",
+      "API keys",
+      "service tokens",
+      "merged full model checkpoints"
+    ]
+  }
+}

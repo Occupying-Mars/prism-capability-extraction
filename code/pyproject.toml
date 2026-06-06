@@ -1,0 +1,21 @@
+[project]
+name = "prism-capability-extraction"
+version = "0.1.0"
+description = "Public Prism code artifact for capability extraction and sparse conditioned recovery"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.0",
+    "transformers>=4.40",
+    "datasets>=2.18",
+    "huggingface-hub>=0.23",
+    "pyvene>=0.1.8",
+    "plotly>=5.0",
+    "wandb>=0.15",
+    "pytest>=7.0",
+    "peft>=0.19.1",
+    "sacrebleu>=2.5",
+    "unbabel-comet>=2.2",
+]

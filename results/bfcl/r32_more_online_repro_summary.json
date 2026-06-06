@@ -1,0 +1,25 @@
+{
+  "name": "issue51_r32_more_online_codex_reproduction",
+  "base_model": "Qwen/Qwen3-8B",
+  "condition": "k160 masked full-model reproduction",
+  "examples": 1007,
+  "reported_metric": "normalized_exact",
+  "normalized_exact_correct": 551,
+  "normalized_exact_accuracy": 0.5471698113207547,
+  "raw_exact_correct": 537,
+  "raw_exact_accuracy": 0.5332671300893744,
+  "mask_topk": 160000,
+  "bfcl_canonicalization_prompt": true,
+  "source_run": "runs/issue49_bfcl_single_call/issue51_k160_r32_hparam_sweep_codex_20260605_174857/r32_more_online",
+  "full_model_artifact": {
+    "repo": "TokenBender/issue51-r32-more-online-codex-repro-551-full",
+    "url": "https://huggingface.co/TokenBender/issue51-r32-more-online-codex-repro-551-full",
+    "sha": "ff4daac9e49a8f927153c9a04daa9faba2fb5a66"
+  },
+  "dataset_and_receipts_artifact": {
+    "repo": "Occupying-Mars/issue49-bfcl-repro-artifacts",
+    "url": "https://huggingface.co/datasets/Occupying-Mars/issue49-bfcl-repro-artifacts",
+    "sha": "303db0bddcfb04bebaf07ab4a4dc4c089240c545"
+  }
+}
+

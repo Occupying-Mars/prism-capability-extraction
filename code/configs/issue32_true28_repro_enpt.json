@@ -1,0 +1,92 @@
+{
+  "issue": 32,
+  "name": "true_issue28_repro_enpt_lora_lens",
+  "objective": "Reproduce the strongest recorded issue #28 EN->PT result from the science trail, rebuilding preserved run artifacts rather than approximating with the prior #32 region-student run.",
+  "target_result": {
+    "source_issue": 28,
+    "heldout_eval": "NTREX EN->PT, 1012 rows",
+    "judge": "Unbabel/XCOMET-XXL",
+    "budget_k": 160000,
+    "recorded_scores": {
+      "base_fixed_k160000": 0.6300551002,
+      "r2_fixed_k160000": 0.7655800197,
+      "r4_fixed_k160000": 0.7979727848,
+      "r8_fixed_k160000": 0.8121489377
+    },
+    "strongest_condition": "r8 fixed k=160000 LoRA/rsLoRA rescue under matched mean-ablation lesion"
+  },
+  "reconstruction_sources": {
+    "issue23": "fixed-mask masked-KL conditioning setup and data/mask/eval definitions",
+    "issue24": "low-rank rescue rank-ladder implementation and fixed-lesion recipe",
+    "issue28": "rank-2/4/8 low-rank LoRA lens objective and recorded XCOMET table"
+  },
+  "model": {
+    "base": "tencent/HY-MT1.5-1.8B",
+    "prompt_style": "hy_mt",
+    "target_language": "Portuguese",
+    "src_lang": "eng_Latn",
+    "tgt_lang": "por_Latn"
+  },
+  "data": {
+    "train_source": "FLORES EN->PT devtest JSONL",
+    "train_targets": "unmasked HY-MT greedy teacher hypotheses in model_hyp",
+    "attribution_source": "FLORES EN->PT dev sampled by attribute_translation.py",
+    "heldout_eval": "NTREX EN->PT test split truncated to 1012 rows",
+    "heldout_policy": "NTREX is used only for final generation and XCOMET scoring"
+  },
+  "mask": {
+    "method": "ReLP translation attribution",
+    "script": "attribute_translation.py",
+    "metric": "first_token_logit",
+    "n_attr": 200,
+    "ks": [160000],
+    "file": "base_attr/relp_k160000.full.npz",
+    "intervention": "mean ablation at MLP down_proj input; selected channels stay live"
+  },
+  "lora_rescue": {
+    "script": "train_masked_kl_conditioning.py",
+    "target_modules": "all-linear",
+    "use_rslora": true,
+    "ranks": [2, 4, 8],
+    "lora_alpha": "2 * rank",
+    "epochs": 1.0,
+    "lr": 0.0002,
+    "batch_size": 2,
+    "grad_accum": 8,
+    "masked_kl_beta": 1.0,
+    "ce_beta": 0.2,
+    "unmasked_kl_beta": 0.05,
+    "n_calib": 128,
+    "save_merged": false
+  },
+  "eval": {
+    "base_condition": "HY-MT under relp_k160000 mean-ablation mask",
+    "adapter_conditions": "base HY-MT plus PEFT adapter merged in memory, then evaluated under the same relp_k160000 mask",
+    "decode": "greedy generation, max_new_tokens=384",
+    "primary_metric": "XCOMET-XXL system_score on masked/fixed_k160000 dumps",
+    "sanity_metrics": ["chrF++", "chrF", "BLEU"],
+    "repro_tolerance": "Report exact reproduced scores and deltas; do not claim success unless the r8 result lands near the recorded #28 frontier and ranking stays r8 > r4 > r2 > base."
+  },
+  "artifacts": {
+    "primary_hf_repo": "public-translation-data-source",
+    "mirror_hf_repo": "public-translation-artifact-backup",
+    "include": [
+      "config and runbook",
+      "FLORES teacher-hyp train JSONL",
+      "ReLP k=160000 mask",
+      "adapter checkpoints for r2/r4/r8",
+      "generation eval JSONs",
+      "NTREX hypothesis dumps",
+      "XCOMET summaries and scored pools",
+      "logs, manifests, checksums"
+    ],
+    "exclude": [
+      "upstream HY-MT weights",
+      "XCOMET weights",
+      "Hugging Face cache directories",
+      "API keys",
+      "service tokens",
+      "merged full model checkpoints"
+    ]
+  }
+}

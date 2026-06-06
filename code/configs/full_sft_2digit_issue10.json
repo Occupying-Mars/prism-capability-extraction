@@ -1,0 +1,65 @@
+{
+  "issue": 10,
+  "question": "Would full-parameter SFT beat the rank-32 LoRA sparse 2-digit full-answer circuit frontier?",
+  "reference": {
+    "name": "rank32_topk_500",
+    "fresh_generation_exact": 0.9133,
+    "mlp_kept": 12661,
+    "total_model_equivalent_param_fraction": 0.0378
+  },
+  "model": "Qwen/Qwen2.5-Math-1.5B",
+  "hardware_target": "4xL40S",
+  "training": {
+    "script": "train_full_sft_2digit_kl.py",
+    "launcher": "torchrun --standalone --nproc-per-node 4",
+    "min": 10,
+    "max": 99,
+    "include_compact": true,
+    "include_spaced": true,
+    "dtype": "bfloat16",
+    "seed": 42,
+    "epochs": 3.0,
+    "per_device_batch_size": 16,
+    "global_batch_size": 64,
+    "grad_accum": 1,
+    "max_steps": 300,
+    "warmup_ratio": 0.05,
+    "max_grad_norm": 1.0,
+    "weight_decay": 0.0,
+    "variants": [
+      {
+        "name": "full_sft_kl_beta005_lr1e5",
+        "lr": 0.00001,
+        "kl_beta": 0.05,
+        "kl_on": "prompt",
+        "purpose": "closest full-parameter analogue of the rank-32 KL-LoRA recipe"
+      },
+      {
+        "name": "full_sft_ce_lr1e5",
+        "lr": 0.00001,
+        "kl_beta": 0.0,
+        "kl_on": "none",
+        "purpose": "plain supervised full fine-tuning baseline"
+      }
+    ]
+  },
+  "extraction": {
+    "correct_dataset": "generate_correct_dataset.py",
+    "position_trace": "position_interface_decomposition.py --multi-gpu",
+    "positions": ["hundreds", "tens", "ones"],
+    "n_per_position": 4000,
+    "n_prune_test": 500,
+    "trace_seed": 42,
+    "fresh_seed": 123,
+    "target_search": "optimize_full_answer_target_mask.py",
+    "target_accuracy": 0.9,
+    "baseline_masks": ["topk_100", "rel_0.05", "topk_500", "rel_0.01", "topk_2000", "rel_0.001"],
+    "base_mask": "topk_500",
+    "shells": ["rel_0.01:topk_500", "topk_2000:topk_500", "rel_0.001:topk_500"]
+  },
+  "outputs": {
+    "root": "results/qwen25_math_1p5b_2digit_full_sft_issue10",
+    "public_artifacts": "docs/ARTIFACT_MANIFEST.json",
+    "summary": "summary.md"
+  }
+}
