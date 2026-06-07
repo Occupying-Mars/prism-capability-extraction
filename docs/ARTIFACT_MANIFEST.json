@@ -1,6 +1,10 @@
 {
   "artifact_name": "prism_capability_extraction_public_release",
   "paper_title": "Prism: Unlocking Language Model Capability Extraction",
+  "paper_authors": [
+    "Abhishek Mishra",
+    "Krishna Pagare"
+  ],
   "release_type": "flattened_single_commit_code_and_artifact_index",
   "status": "complete",
   "release_scope": {

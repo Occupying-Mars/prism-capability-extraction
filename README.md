@@ -1,5 +1,7 @@
 # Prism: Unlocking Language Model Capability Extraction
 
+Authors: Abhishek Mishra, Krishna Pagare
+
 A trained language model holds many capabilities at once, while a deployment
 usually asks it to exercise only one. Prism asks whether a named capability can
 be made to run through a sparse set of MLP channels while the surrounding
