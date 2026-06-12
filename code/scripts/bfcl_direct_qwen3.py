@@ -396,7 +396,7 @@ def extract_json_objects(text: str) -> list[str]:
 def canonical(value: Any) -> Any:
     value = parse_maybe_json(value)
     if isinstance(value, dict):
-        return {str(k): canonical(v) for k, v in sorted(value.items())}
+        return {str(k): canonical(v) for k, v in sorted(value.items(), key=lambda item: str(item[0]))}
     if isinstance(value, list):
         return [canonical(v) for v in value]
     if isinstance(value, set):
