@@ -17,6 +17,7 @@ dependencies = [
     "pytest>=7.0",
     "peft>=0.19.1",
     "safetensors>=0.4",
+    "tiktoken>=0.7",
     "sacrebleu>=2.5",
     "unbabel-comet>=2.2",
 ]

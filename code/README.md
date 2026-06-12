@@ -10,6 +10,8 @@ The Qwen physical-substrate runtime lives in `prism_qwen/runtime/`. It is kept
 separate from the existing public experiment scripts so the release tree stays
 small and model-specific runtime code is easy to audit.
 
+GLM-specific BFCL attribution/eval/training code lives in `prism_glm/`.
+
 From the repository root:
 
 ```bash
