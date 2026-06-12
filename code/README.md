@@ -6,6 +6,10 @@ used by the public Prism capability-extraction release.
 Python 3.12+ is recommended. Full reruns require large public models, public
 datasets, and GPU hardware.
 
+The Qwen physical-substrate runtime lives in `prism_qwen/runtime/`. It is kept
+separate from the existing public experiment scripts so the release tree stays
+small and model-specific runtime code is easy to audit.
+
 From the repository root:
 
 ```bash
