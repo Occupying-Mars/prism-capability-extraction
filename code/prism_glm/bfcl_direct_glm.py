@@ -10,6 +10,12 @@ from pathlib import Path
 
 import torch
 
+if hasattr(torch, "distributed") and not hasattr(torch.distributed, "tensor"):
+    try:
+        import torch.distributed.tensor  # noqa: F401
+    except Exception:
+        pass
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from peft import PeftModel  # noqa: E402
