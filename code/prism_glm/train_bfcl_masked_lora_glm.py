@@ -18,6 +18,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedul
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from prism_common.wandb_utils import add_wandb_args, init_wandb_run, log_wandb_receipts  # noqa: E402
 from scripts.train_bfcl_masked_lora import (  # noqa: E402
     answer_ce_loss,
     collate,
@@ -69,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--save-every", type=int, default=0)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--save-merged", action=argparse.BooleanOptionalAction, default=False)
+    add_wandb_args(p, default_group="glm-bfcl", default_tags="bfcl,glm,masked-lora")
     return p.parse_args()
 
 
@@ -237,65 +239,91 @@ def main() -> None:
     scheduler = get_cosine_schedule_with_warmup(optimizer, num_warmup_steps=warmup_steps, num_training_steps=total_steps)
     summary = {"args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}, "n_rows": len(dataset), "n_layers": n_layers, "d_ffn": d_ffn, "mask_kept": kept, "total_steps": total_steps, "warmup_steps": warmup_steps, "logs": [], "checkpoints": []}
     (args.out_dir / "config.json").write_text(json.dumps(summary, indent=2))
+    summary_path = args.out_dir / "train_summary.json"
+    wandb_run = init_wandb_run(
+        args,
+        config=summary,
+        default_group="glm-bfcl",
+        default_name="glm_bfcl_masked_lora",
+        default_tags="bfcl,glm,masked-lora",
+    )
 
     start = time.time()
     global_step = 0
     seen_batches = 0
     running = {"loss": 0.0, "masked_kl": 0.0, "ce": 0.0, "unmasked_kl": 0.0, "n": 0}
     optimizer.zero_grad(set_to_none=True)
-    while global_step < total_steps:
-        for raw_batch in loader:
-            if global_step >= total_steps:
-                break
-            batch = move_batch(raw_batch, str(input_device))
-            with torch.no_grad(), model.disable_adapter():
-                teacher_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False).logits
-            hooks = install_mean_ablation_hooks(model, mask, means, dtype=dtype)
-            try:
-                masked_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False).logits
-            finally:
-                for h in hooks:
-                    h.remove()
-            masked_kl = kl_loss(masked_logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
-            ce = answer_ce_loss(masked_logits, batch["labels"])
-            if args.unmasked_kl_beta > 0:
-                unmasked_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False).logits
-                unmasked_kl = kl_loss(unmasked_logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
-            else:
-                unmasked_kl = masked_logits.new_zeros(())
-            loss = args.masked_kl_beta * masked_kl + args.ce_beta * ce + args.unmasked_kl_beta * unmasked_kl
-            (loss / args.grad_accum).backward()
-            seen_batches += 1
-            for key, value in (("loss", loss), ("masked_kl", masked_kl), ("ce", ce), ("unmasked_kl", unmasked_kl)):
-                running[key] += float(value.detach().cpu())
-            running["n"] += 1
-            if seen_batches % args.grad_accum != 0:
-                continue
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad(set_to_none=True)
-            global_step += 1
-            if global_step == 1 or global_step % args.eval_every == 0 or global_step == total_steps:
-                denom = max(running["n"], 1)
-                row = {k: running[k] / denom for k in ("loss", "masked_kl", "ce", "unmasked_kl")}
-                row.update({"step": global_step, "lr": scheduler.get_last_lr()[0], "elapsed_s": time.time() - start})
-                summary["logs"].append(row)
-                (args.out_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
-                print(json.dumps(row), flush=True)
-                running = {"loss": 0.0, "masked_kl": 0.0, "ce": 0.0, "unmasked_kl": 0.0, "n": 0}
-            if args.save_every and global_step % args.save_every == 0:
-                checkpoint_dir = save_adapter_checkpoint(model, tokenizer, args.out_dir, global_step)
-                summary["checkpoints"].append({"step": global_step, "adapter_dir": str(checkpoint_dir)})
+    try:
+        while global_step < total_steps:
+            for raw_batch in loader:
+                if global_step >= total_steps:
+                    break
+                batch = move_batch(raw_batch, str(input_device))
+                with torch.no_grad(), model.disable_adapter():
+                    teacher_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False).logits
+                hooks = install_mean_ablation_hooks(model, mask, means, dtype=dtype)
+                try:
+                    masked_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False).logits
+                finally:
+                    for h in hooks:
+                        h.remove()
+                masked_kl = kl_loss(masked_logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
+                ce = answer_ce_loss(masked_logits, batch["labels"])
+                if args.unmasked_kl_beta > 0:
+                    unmasked_logits = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False).logits
+                    unmasked_kl = kl_loss(unmasked_logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
+                else:
+                    unmasked_kl = masked_logits.new_zeros(())
+                loss = args.masked_kl_beta * masked_kl + args.ce_beta * ce + args.unmasked_kl_beta * unmasked_kl
+                (loss / args.grad_accum).backward()
+                seen_batches += 1
+                for key, value in (("loss", loss), ("masked_kl", masked_kl), ("ce", ce), ("unmasked_kl", unmasked_kl)):
+                    running[key] += float(value.detach().cpu())
+                running["n"] += 1
+                if seen_batches % args.grad_accum != 0:
+                    continue
+                torch.nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+                if global_step == 1 or global_step % args.eval_every == 0 or global_step == total_steps:
+                    denom = max(running["n"], 1)
+                    row = {k: running[k] / denom for k in ("loss", "masked_kl", "ce", "unmasked_kl")}
+                    row.update({"step": global_step, "lr": scheduler.get_last_lr()[0], "elapsed_s": time.time() - start})
+                    summary["logs"].append(row)
+                    summary_path.write_text(json.dumps(summary, indent=2))
+                    print(json.dumps(row), flush=True)
+                    if wandb_run is not None:
+                        wandb_run.log({f"train/{k}": v for k, v in row.items()}, step=global_step)
+                    running = {"loss": 0.0, "masked_kl": 0.0, "ce": 0.0, "unmasked_kl": 0.0, "n": 0}
+                if args.save_every and global_step % args.save_every == 0:
+                    checkpoint_dir = save_adapter_checkpoint(model, tokenizer, args.out_dir, global_step)
+                    summary["checkpoints"].append({"step": global_step, "adapter_dir": str(checkpoint_dir)})
+                    summary_path.write_text(json.dumps(summary, indent=2))
 
-    model.eval()
-    summary["elapsed_s"] = time.time() - start
-    adapter_dir = args.out_dir / "adapter"
-    model.save_pretrained(adapter_dir)
-    tokenizer.save_pretrained(adapter_dir)
-    summary["adapter_dir"] = str(adapter_dir)
-    (args.out_dir / "train_summary.json").write_text(json.dumps(summary, indent=2))
-    print(f"[done] adapter={adapter_dir}", flush=True)
+        model.eval()
+        summary["elapsed_s"] = time.time() - start
+        adapter_dir = args.out_dir / "adapter"
+        model.save_pretrained(adapter_dir)
+        tokenizer.save_pretrained(adapter_dir)
+        summary["adapter_dir"] = str(adapter_dir)
+        summary_path.write_text(json.dumps(summary, indent=2))
+        if wandb_run is not None:
+            wandb_run.summary.update(
+                {
+                    "n_rows": len(dataset),
+                    "total_steps": total_steps,
+                    "adapter_dir": summary.get("adapter_dir"),
+                    "elapsed_s": summary.get("elapsed_s"),
+                    "mask_kept": kept,
+                }
+            )
+            log_wandb_receipts(wandb_run, name="glm-bfcl-masked-lora-receipts", files=[args.out_dir / "config.json", summary_path])
+        print(f"[done] adapter={adapter_dir}", flush=True)
+    finally:
+        if wandb_run is not None:
+            wandb_run.finish()
 
 
 if __name__ == "__main__":
