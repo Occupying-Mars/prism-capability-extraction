@@ -34,7 +34,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from prism_common.wandb_utils import add_wandb_args, init_wandb_run, log_wandb_receipts  # noqa: E402
 from prism_glm.bfcl_direct_glm import format_glm_native_target, glm_native_prompt_text, glm_prompt_text  # noqa: E402
-from scripts.train_bfcl_masked_lora import answer_ce_loss, collate, move_batch, read_jsonl  # noqa: E402
+from scripts.train_bfcl_masked_lora import answer_ce_loss, collate, kl_loss, move_batch, read_jsonl  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,6 +58,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--weight-decay", type=float, default=0.0)
     p.add_argument("--warmup-ratio", type=float, default=0.03)
     p.add_argument("--max-grad-norm", type=float, default=1.0)
+    p.add_argument("--policy-kl-beta", type=float, default=0.0)
+    p.add_argument("--ce-beta", type=float, default=1.0)
+    p.add_argument("--kl-temperature", type=float, default=1.0)
     p.add_argument("--optimizer", choices=["adamw", "adafactor"], default=None)
     p.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--lora-r", type=int, default=16)
@@ -237,8 +240,7 @@ def main() -> None:
     start = time.time()
     global_step = 0
     seen_batches = 0
-    running_loss = 0.0
-    running_n = 0
+    running = {"loss": 0.0, "policy_kl": 0.0, "ce": 0.0, "n": 0}
     optimizer.zero_grad(set_to_none=True)
     try:
         while global_step < total_steps:
@@ -246,12 +248,30 @@ def main() -> None:
                 if global_step >= total_steps:
                     break
                 batch = move_batch(raw_batch, args.device)
+                teacher_logits = None
+                if args.policy_kl_beta:
+                    if not hasattr(model, "disable_adapter"):
+                        raise ValueError("--policy-kl-beta currently requires train-mode=lora")
+                    with torch.no_grad(), model.disable_adapter():
+                        teacher_logits = model(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            use_cache=False,
+                        ).logits
+
                 out = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"], use_cache=False)
-                loss = answer_ce_loss(out.logits, batch["labels"])
+                ce = answer_ce_loss(out.logits, batch["labels"])
+                if teacher_logits is None:
+                    policy_kl = torch.zeros((), device=ce.device, dtype=ce.dtype)
+                else:
+                    policy_kl = kl_loss(out.logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
+                loss = args.policy_kl_beta * policy_kl + args.ce_beta * ce
                 (loss / args.grad_accum).backward()
                 seen_batches += 1
-                running_loss += float(loss.detach().cpu())
-                running_n += 1
+                running["loss"] += float(loss.detach().cpu())
+                running["policy_kl"] += float(policy_kl.detach().cpu())
+                running["ce"] += float(ce.detach().cpu())
+                running["n"] += 1
                 if seen_batches % args.grad_accum != 0:
                     continue
 
@@ -262,9 +282,12 @@ def main() -> None:
                 global_step += 1
 
                 if global_step == 1 or global_step % args.log_every == 0 or global_step == total_steps:
+                    denom = max(running["n"], 1)
                     row = {
                         "step": global_step,
-                        "loss": running_loss / max(running_n, 1),
+                        "loss": running["loss"] / denom,
+                        "policy_kl": running["policy_kl"] / denom,
+                        "ce": running["ce"] / denom,
                         "lr": scheduler.get_last_lr()[0],
                         "elapsed_s": time.time() - start,
                     }
@@ -273,8 +296,7 @@ def main() -> None:
                     print(json.dumps(row), flush=True)
                     if wandb_run is not None:
                         wandb_run.log({f"train/{k}": v for k, v in row.items()}, step=global_step)
-                    running_loss = 0.0
-                    running_n = 0
+                    running = {"loss": 0.0, "policy_kl": 0.0, "ce": 0.0, "n": 0}
 
                 if args.save_every and global_step % args.save_every == 0:
                     ckpt = args.out_dir / f"checkpoint_step_{global_step:06d}"
