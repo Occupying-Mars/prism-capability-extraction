@@ -1,0 +1,63 @@
+{
+  "experiment_id": "glm_bfcl_mace_two_budget_v1",
+  "model": "zai-org/glm-4-9b-chat",
+  "goal": "Run the GLM version of the #2 pre-attribution collimation recipe and evaluate only two selected-MLP-channel budgets.",
+  "training": {
+    "mode": "unmasked_lora_before_attribution",
+    "train_jsonl": "data/bfcl_strict_10k_mix/train.jsonl",
+    "prompt_format": "glm_native",
+    "target_format": "glm_native",
+    "lora_r": 32,
+    "lora_alpha": 64,
+    "epochs": 1.0,
+    "batch_size": 1,
+    "grad_accum": 16,
+    "lr": 0.0002
+  },
+  "attribution": {
+    "method": "GLM MLP ReLP",
+    "pairs": "data/bfcl_single_call/pairs.jsonl",
+    "target": "merged local LoRA model",
+    "prompt_format": "glm_native",
+    "target_format": "glm_native"
+  },
+  "budgets": [
+    {
+      "name": "p50",
+      "fraction": 0.5,
+      "description": "50% of GLM MLP intermediate channels"
+    },
+    {
+      "name": "p36",
+      "fraction": 0.36,
+      "description": "36% of GLM MLP intermediate channels"
+    }
+  ],
+  "evals": {
+    "include_base_unmasked_anchor": true,
+    "include_adapter_unmasked_anchor": true,
+    "selected_channel_intervention": "full transformer remains live; non-selected GLM MLP intermediate channels are zeroed"
+  },
+  "artifact_policy": {
+    "stage_locally_on_pod": true,
+    "hf_upload_default": false,
+    "upload_include": [
+      "config",
+      "train summary",
+      "adapter",
+      "merged attribution target path in summary only",
+      "attribution npz and summary",
+      "p50/p36 eval outputs and summaries",
+      "failure buckets",
+      "final summary",
+      "logs"
+    ],
+    "upload_exclude": [
+      "base model cache",
+      "merged full model weights",
+      "secrets",
+      ".env",
+      "wandb cache"
+    ]
+  }
+}
