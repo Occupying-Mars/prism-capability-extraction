@@ -67,10 +67,13 @@ fi
 WANDB_MODE_INPUT="${WANDB_MODE:-$(read_dotenv_value WANDB_MODE)}"
 WANDB_MODE_INPUT="${WANDB_MODE_INPUT:-auto}"
 WANDB_API_KEY_INPUT="${WANDB_API_KEY:-$(read_dotenv_value WANDB_API_KEY)}"
+WANDB_API_KEY_INPUT="${WANDB_API_KEY_INPUT:-$(read_dotenv_value wandb_api_key)}"
 WANDB_ENTITY_INPUT="${WANDB_ENTITY:-$(read_dotenv_value WANDB_ENTITY)}"
 WANDB_PROJECT_INPUT="${WANDB_PROJECT:-$(read_dotenv_value WANDB_PROJECT)}"
 WANDB_GROUP_INPUT="${WANDB_GROUP:-$(read_dotenv_value WANDB_GROUP)}"
 HF_TOKEN_INPUT="${HF_TOKEN:-${HUGGING_FACE_HUB_TOKEN:-$(read_dotenv_value HF_TOKEN)}}"
+HF_TOKEN_INPUT="${HF_TOKEN_INPUT:-$(read_dotenv_value HUGGING_FACE_HUB_TOKEN)}"
+HF_TOKEN_INPUT="${HF_TOKEN_INPUT:-$(read_dotenv_value hf_token)}"
 if [[ -z "$HF_TOKEN_INPUT" && -s "$HOME/.cache/huggingface/token" ]]; then
   HF_TOKEN_INPUT="$(tr -d '\n' < "$HOME/.cache/huggingface/token")"
 fi
@@ -150,11 +153,18 @@ setup_env() {
   cd "$REMOTE_REPO"
   local uv
   uv="$(uv_bin)"
-  "$uv" venv --system-site-packages .venv
+  "$uv" venv .venv
   source .venv/bin/activate
   "$uv" pip install -U pip setuptools wheel
   "$uv" pip install -e code
-  "$uv" pip install -U "peft>=0.19.1" "wandb>=0.15" "huggingface-hub>=0.23" "safetensors" "tiktoken>=0.7"
+  "$uv" pip install -U \
+    "peft==0.19.1" \
+    "transformers==4.44.2" \
+    "tokenizers==0.19.1" \
+    "huggingface-hub==0.36.0" \
+    "wandb>=0.15" \
+    "safetensors" \
+    "tiktoken>=0.7"
   python - <<'PY'
 import os
 import torch
@@ -472,6 +482,7 @@ case "$mode" in
 esac
 REMOTE
 
+lium exec "$TARGET" "mkdir -p '$REMOTE_RUNS'"
 lium scp "$TARGET" "$tmpdir/glm_bfcl_env" /root/
 lium scp "$TARGET" "$tmpdir/glm_bfcl_mace_two_budget.sh" "$REMOTE_LAUNCH"
-lium exec "$TARGET" "chmod +x '$REMOTE_LAUNCH' && tmux new -d -s '$SESSION' 'REMOTE_REPO=$REMOTE_REPO REMOTE_RUNS=$REMOTE_RUNS bash $REMOTE_LAUNCH run' && tmux ls"
+lium exec "$TARGET" "chmod 600 /root/glm_bfcl_env && chmod +x '$REMOTE_LAUNCH' && tmux new -d -s '$SESSION' 'REMOTE_REPO=$REMOTE_REPO REMOTE_RUNS=$REMOTE_RUNS bash $REMOTE_LAUNCH run' && tmux ls"
