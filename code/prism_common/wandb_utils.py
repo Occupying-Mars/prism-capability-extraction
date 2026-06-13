@@ -99,6 +99,14 @@ def _first(name: str, dotenv: dict[str, str]) -> str | None:
     return dotenv.get(name) or os.environ.get(name)
 
 
+def _first_any(names: tuple[str, ...], dotenv: dict[str, str]) -> str | None:
+    for name in names:
+        value = _first(name, dotenv)
+        if value:
+            return value
+    return None
+
+
 def _split_tags(value: str | None) -> list[str]:
     if not value:
         return []
@@ -115,16 +123,19 @@ def wandb_settings_from_args(
     default_tags: str = "",
 ) -> WandbSettings:
     dotenv, env_file = load_env_file(getattr(args, "wandb_env_file", None))
-    api_key = _first("WANDB_API_KEY", dotenv)
+    api_key = _first_any(("WANDB_API_KEY", "wandb_api_key"), dotenv)
     if api_key and not os.environ.get("WANDB_API_KEY"):
         os.environ["WANDB_API_KEY"] = api_key
 
     mode = getattr(args, "wandb_mode", "auto")
     if mode == "auto":
-        mode = _first("WANDB_MODE", dotenv) or ("online" if api_key else "disabled")
+        mode = _first_any(("WANDB_MODE", "wandb_mode"), dotenv) or "auto"
+    if mode == "auto":
+        mode = "online" if api_key else "disabled"
     if mode == "online" and not api_key:
         print("[wandb] no WANDB_API_KEY in .env or environment; disabling", flush=True)
         mode = "disabled"
+    os.environ["WANDB_MODE"] = mode
 
     project = getattr(args, "wandb_project", None) or _first("WANDB_PROJECT", dotenv) or default_project
     entity = getattr(args, "wandb_entity", None) or _first("WANDB_ENTITY", dotenv)

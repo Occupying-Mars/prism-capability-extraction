@@ -153,7 +153,9 @@ setup_env() {
   cd "$REMOTE_REPO"
   local uv
   uv="$(uv_bin)"
-  "$uv" venv .venv
+  if [[ ! -x .venv/bin/python ]]; then
+    "$uv" venv .venv
+  fi
   source .venv/bin/activate
   "$uv" pip install -U pip setuptools wheel
   "$uv" pip install -e code
