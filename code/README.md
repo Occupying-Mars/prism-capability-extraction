@@ -12,6 +12,8 @@ small and model-specific runtime code is easy to audit.
 
 GLM-specific BFCL attribution/eval/training code lives in `prism_glm/`.
 
+OLMo-specific BFCL attribution/eval code lives in `prism_olmo/`.
+
 From the repository root:
 
 ```bash
