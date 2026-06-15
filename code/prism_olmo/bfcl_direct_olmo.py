@@ -23,12 +23,12 @@ from scripts.bfcl_direct_qwen3 import (  # noqa: E402
 )
 
 
-def olmo_prompt_text(row: dict) -> str:
+def olmo_prompt_text(row: dict, *, call_tag: str = "tool_call") -> str:
     parts = [
         "You are a function-calling assistant.",
         "Return exactly one tool call and no prose.",
         "Use this exact format:",
-        '<tool_call>{"name":"function_name","arguments":{}}</tool_call>',
+        f'<{call_tag}>{{"name":"function_name","arguments":{{}}}}</{call_tag}>',
     ]
     if row.get("tools"):
         parts.append("Available tools:\n" + json.dumps(row["tools"], ensure_ascii=False))
@@ -97,17 +97,33 @@ def load_model_and_tokenizer(args: argparse.Namespace):
         device_map=args.device_map,
         attn_implementation="eager",
     )
+    if getattr(args, "adapter", None):
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, args.adapter)
     model.eval()
     return model, tokenizer
 
 
-def encode_prompt(tokenizer, row: dict):
-    return tokenizer(olmo_prompt_text(row), add_special_tokens=True, return_tensors="pt")
+def format_olmo_target(row: dict, *, call_tag: str = "tool_call") -> str:
+    if call_tag == "tool_call":
+        return format_tool_call_target(row)
+    call = row.get("target_call")
+    if not isinstance(call, dict):
+        refs = row.get("reference_calls") or []
+        call = refs[0] if refs and isinstance(refs[0], dict) else None
+    if not isinstance(call, dict):
+        raise ValueError(f"row {row.get('id')} has no target call")
+    return f"<{call_tag}>" + json.dumps(call, ensure_ascii=False) + f"</{call_tag}>"
 
 
-def build_attr_prompt_target(tokenizer, row: dict):
-    prompt = encode_prompt(tokenizer, row)
-    target_text = format_tool_call_target(row)
+def encode_prompt(tokenizer, row: dict, *, call_tag: str = "tool_call"):
+    return tokenizer(olmo_prompt_text(row, call_tag=call_tag), add_special_tokens=True, return_tensors="pt")
+
+
+def build_attr_prompt_target(tokenizer, row: dict, *, call_tag: str = "tool_call"):
+    prompt = encode_prompt(tokenizer, row, call_tag=call_tag)
+    target_text = format_olmo_target(row, call_tag=call_tag)
     target_ids = tokenizer(target_text, add_special_tokens=False, return_tensors="pt")["input_ids"]
     input_ids = torch.cat([prompt["input_ids"], target_ids], dim=1)
     attention_mask = torch.ones_like(input_ids)
@@ -129,7 +145,7 @@ def eval_bfcl(args: argparse.Namespace) -> None:
     try:
         for start in range(0, len(rows), args.batch_size):
             batch_rows = rows[start : start + args.batch_size]
-            prompts = [olmo_prompt_text(row) for row in batch_rows]
+            prompts = [olmo_prompt_text(row, call_tag=args.call_tag) for row in batch_rows]
             encoded = tokenizer(prompts, add_special_tokens=True, padding=True, return_tensors="pt").to(model.device)
             prompt_len = encoded["input_ids"].shape[-1]
             with torch.inference_mode():
@@ -174,11 +190,12 @@ def eval_bfcl(args: argparse.Namespace) -> None:
         "normalized_exact_accuracy": norm / judged if judged else None,
         "reported_metric": "normalized_exact",
         "prompt_format": "olmo_manual_tool_call",
-        "target_format": "tool_call",
+        "target_format": args.call_tag,
         "mask_mode": "zero" if args.topk else "none",
         "mask_topk": args.topk or None,
         "attribution": str(args.attribution) if args.attribution else None,
         "base": args.model,
+        "adapter": args.adapter,
         "generations": str(args.output),
         "batch_size": args.batch_size,
         "max_new_tokens": args.max_new_tokens,
@@ -201,7 +218,7 @@ def relp_attribute(args: argparse.Namespace) -> None:
     scores = torch.zeros((n_layers, d_ffn), dtype=torch.float32)
 
     for i, row in enumerate(rows, start=1):
-        input_ids, attention_mask, prompt_len, target_ids = build_attr_prompt_target(tokenizer, row)
+        input_ids, attention_mask, prompt_len, target_ids = build_attr_prompt_target(tokenizer, row, call_tag=args.call_tag)
         input_ids = input_ids.to(device)
         attention_mask = attention_mask.to(device)
         target_ids = target_ids.to(device)
@@ -234,7 +251,7 @@ def relp_attribute(args: argparse.Namespace) -> None:
         "model": args.model,
         "objective": "teacher-forced gold tool-call logprob over full continuation; OLMo MLP ReLP",
         "prompt_format": "olmo_manual_tool_call",
-        "target_format": "tool_call",
+        "target_format": args.call_tag,
         "scores": str(args.output),
         "shape": [n_layers, d_ffn],
         "top": [
@@ -258,12 +275,14 @@ def main() -> None:
     p.add_argument("--limit", type=int)
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--report-topk", type=int, default=20)
+    p.add_argument("--call-tag", choices=["tool_call", "function_call"], default="tool_call")
     p.set_defaults(func=relp_attribute)
     e = sub.add_parser("eval")
     e.add_argument("--name", required=True)
     e.add_argument("--pairs", type=Path, required=True)
     e.add_argument("--output", type=Path, required=True)
     e.add_argument("--model", default="allenai/OLMo-7B-hf")
+    e.add_argument("--adapter")
     e.add_argument("--attribution", type=Path)
     e.add_argument("--topk", type=int, default=0)
     e.add_argument("--batch-size", type=int, default=4)
@@ -271,6 +290,7 @@ def main() -> None:
     e.add_argument("--dtype", default="bfloat16")
     e.add_argument("--device-map", default="auto")
     e.add_argument("--limit", type=int)
+    e.add_argument("--call-tag", choices=["tool_call", "function_call"], default="tool_call")
     e.set_defaults(func=eval_bfcl)
     args = parser.parse_args()
     args.func(args)
