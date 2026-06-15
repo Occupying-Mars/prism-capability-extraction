@@ -106,14 +106,17 @@ def load_model_and_tokenizer(args: argparse.Namespace):
 
 
 def format_olmo_target(row: dict, *, call_tag: str = "tool_call") -> str:
-    if call_tag == "tool_call":
-        return format_tool_call_target(row)
+    target_text = row.get("target_text")
+    if call_tag == "tool_call" and isinstance(target_text, str) and "<tool_call>" in target_text:
+        return target_text.strip()
     call = row.get("target_call")
     if not isinstance(call, dict):
         refs = row.get("reference_calls") or []
         call = refs[0] if refs and isinstance(refs[0], dict) else None
     if not isinstance(call, dict):
         raise ValueError(f"row {row.get('id')} has no target call")
+    if call_tag == "tool_call":
+        return "<tool_call>\n" + json.dumps(call, ensure_ascii=False) + "\n</tool_call>"
     return f"<{call_tag}>" + json.dumps(call, ensure_ascii=False) + f"</{call_tag}>"
 
 
