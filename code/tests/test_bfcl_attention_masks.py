@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.bfcl_attention_qwen3 import make_keep_mask
+from scripts.bfcl_attention_qwen3 import make_boundary_swap_keep_mask, make_keep_mask
 
 
 def test_global_ov_mask_picks_highest_channels() -> None:
@@ -87,3 +87,36 @@ def test_head_scaffold_ov_restricts_channel_candidates_to_scaffold_heads() -> No
     assert info["head_scaffold_candidate_ov_channels"] == 2
     assert keep.tolist() == [[True, True, False, False], [False, False, False, False]]
 
+
+def test_boundary_swap_replaces_lowest_selected_batch_with_next_outside_batch() -> None:
+    ov_scores = torch.tensor([[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]], dtype=torch.float32)
+
+    keep, info = make_boundary_swap_keep_mask(
+        ov_scores=ov_scores,
+        topk=4,
+        swap_batch_size=2,
+        remove_batch=0,
+        add_batch=0,
+    )
+
+    assert keep.tolist() == [[True, True, False, False, True, True, False, False]]
+    assert info["removed_rank_start"] == 2
+    assert info["removed_rank_end_exclusive"] == 4
+    assert info["added_rank_start"] == 4
+    assert info["added_rank_end_exclusive"] == 6
+
+
+def test_boundary_swap_can_probe_deeper_outside_batches() -> None:
+    ov_scores = torch.tensor([[8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0]], dtype=torch.float32)
+
+    keep, info = make_boundary_swap_keep_mask(
+        ov_scores=ov_scores,
+        topk=4,
+        swap_batch_size=2,
+        remove_batch=0,
+        add_batch=1,
+    )
+
+    assert keep.tolist() == [[True, True, False, False, False, False, True, True]]
+    assert info["added_rank_start"] == 6
+    assert info["added_rank_end_exclusive"] == 8

@@ -360,6 +360,11 @@ def build_mean_cache(args: argparse.Namespace) -> None:
     model, tokenizer = load_model_and_tokenizer(args)
     device = input_device(model)
     n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
+    mlp_keep, mlp_info = load_mlp_keep_mask(
+        args.mlp_attribution,
+        args.mlp_topk,
+        (n_layers, int(model.config.intermediate_size)),
+    )
     sums = [torch.zeros(hidden, dtype=torch.float64) for _ in range(n_layers)]
     counts = [0 for _ in range(n_layers)]
     hooks = []
@@ -374,6 +379,7 @@ def build_mean_cache(args: argparse.Namespace) -> None:
 
     for layer_idx, layer in enumerate(decoder_layers(model)):
         hooks.append(layer.self_attn.o_proj.register_forward_pre_hook(make_hook(layer_idx)))
+    mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
 
     run = init_wandb_run(
         args,
@@ -382,7 +388,13 @@ def build_mean_cache(args: argparse.Namespace) -> None:
         default_job_type="attention-mean-cache",
         default_name=args.run_name,
         default_tags="bfcl,qwen3,attention,mean-cache",
-        config={"cmd": "build-mean-cache", "model": args.model, "adapter": args.adapter, "examples": len(rows)},
+        config={
+            "cmd": "build-mean-cache",
+            "model": args.model,
+            "adapter": args.adapter,
+            "examples": len(rows),
+            "mlp_mask": mlp_info,
+        },
     )
 
     started = time.time()
@@ -401,6 +413,8 @@ def build_mean_cache(args: argparse.Namespace) -> None:
     finally:
         for hook in hooks:
             hook.remove()
+        for hook in mlp_hooks:
+            hook.remove()
 
     means = torch.stack(
         [
@@ -418,6 +432,7 @@ def build_mean_cache(args: argparse.Namespace) -> None:
         adapter=args.adapter or "",
         examples=len(rows),
         activation="self_attn.o_proj_input",
+        mlp_mask=json.dumps(mlp_info, sort_keys=True) if mlp_info else "",
     )
     summary = {
         "run_name": args.run_name,
@@ -426,6 +441,7 @@ def build_mean_cache(args: argparse.Namespace) -> None:
         "adapter": args.adapter,
         "means": str(args.output),
         "activation": "self_attn.o_proj input",
+        "mlp_mask": mlp_info,
         "counts_min": min(counts) if counts else 0,
         "counts_max": max(counts) if counts else 0,
         "elapsed_s": time.time() - started,
@@ -604,6 +620,76 @@ def mask_output_name(args: argparse.Namespace, topk: int, mask_info: dict[str, A
     random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
     mlp_tag = "_mlp" if mlp_info else ""
     return f"{args.unit}_{args.ablation}{strategy_tag}_k{topk}{mlp_tag}{random_tag}"
+
+
+def make_boundary_swap_keep_mask(
+    *,
+    ov_scores: torch.Tensor,
+    topk: int,
+    swap_batch_size: int,
+    remove_batch: int,
+    add_batch: int,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    if topk <= 0:
+        raise ValueError("--topk must be positive")
+    if swap_batch_size <= 0:
+        raise ValueError("--swap-batch-size must be positive")
+    if remove_batch < 0 or add_batch < 0:
+        raise ValueError("swap batch indexes must be non-negative")
+    n_layers, hidden = ov_scores.shape
+    total = ov_scores.numel()
+    k = min(topk, total)
+    order = torch.argsort(ov_scores.flatten(), descending=True)
+    selected = order[:k]
+    outside = order[k:]
+    remove_end = k - remove_batch * swap_batch_size
+    remove_start = max(remove_end - swap_batch_size, 0)
+    add_start = add_batch * swap_batch_size
+    add_end = min(add_start + (remove_end - remove_start), outside.numel())
+    if remove_start >= remove_end:
+        raise ValueError(f"remove batch {remove_batch} is outside selected topk={k}")
+    if add_start >= add_end:
+        raise ValueError(f"add batch {add_batch} is outside remaining channels")
+    removed = selected[remove_start:remove_end]
+    added = outside[add_start:add_end]
+    kept = torch.cat([selected[:remove_start], selected[remove_end:], added])
+    keep = torch.zeros(total, dtype=torch.bool)
+    keep[kept] = True
+    keep = keep.view(n_layers, hidden)
+    return keep, {
+        "unit": "ov",
+        "mask_strategy": "boundary-swap",
+        "requested_topk": topk,
+        "kept_ov_channels": int(keep.sum().item()),
+        "swap_batch_size": swap_batch_size,
+        "remove_batch": remove_batch,
+        "add_batch": add_batch,
+        "removed_rank_start": int(remove_start),
+        "removed_rank_end_exclusive": int(remove_end),
+        "added_rank_start": int(k + add_start),
+        "added_rank_end_exclusive": int(k + add_end),
+        "removed_score_min": float(ov_scores.flatten()[removed].min().item()),
+        "removed_score_max": float(ov_scores.flatten()[removed].max().item()),
+        "added_score_min": float(ov_scores.flatten()[added].min().item()),
+        "added_score_max": float(ov_scores.flatten()[added].max().item()),
+        "kept_heads_touched": int(
+            sum(keep[layer].view(int(hidden // 128), 128).any(dim=1).sum().item() for layer in range(n_layers))
+        )
+        if hidden % 128 == 0
+        else None,
+    }
+
+
+def boundary_swap_output_name(
+    *,
+    topk: int,
+    swap_batch_size: int,
+    remove_batch: int,
+    add_batch: int,
+    mlp_info: dict[str, Any] | None,
+) -> str:
+    mlp_tag = "_mlp" if mlp_info else ""
+    return f"ov_zero_boundary_swap_k{topk}_b{swap_batch_size}_rm{remove_batch}_add{add_batch}{mlp_tag}"
 
 
 def load_means(path: Path | None, expected_shape: tuple[int, int]) -> torch.Tensor | None:
@@ -1004,6 +1090,141 @@ def eval_ladder(args: argparse.Namespace) -> None:
         run.finish()
 
 
+def eval_boundary_swap(args: argparse.Namespace) -> None:
+    rows = read_records(args.pairs)
+    if args.limit:
+        rows = rows[: args.limit]
+    pairs_by_id = {row["id"]: row for row in rows}
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model, tokenizer = load_model_and_tokenizer(args)
+    n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
+    _head_scores, ov_scores = load_attention_scores(args.attribution)
+    means = load_means(args.mean_cache, (model.config.num_hidden_layers, hidden))
+    mlp_keep, mlp_info = load_mlp_keep_mask(
+        args.mlp_attribution,
+        args.mlp_topk,
+        (n_layers, int(model.config.intermediate_size)),
+    )
+    remove_batches = parse_int_list(args.remove_batches)
+    add_batches = parse_int_list(args.add_batches)
+
+    run = init_wandb_run(
+        args,
+        default_project="prism-bfcl-attention",
+        default_group=args.run_name,
+        default_job_type="attention-boundary-swap-eval",
+        default_name=args.run_name,
+        default_tags="bfcl,qwen3,attention,boundary-swap,eval",
+        config={
+            "cmd": "eval-boundary-swap",
+            "model": args.model,
+            "adapter": args.adapter,
+            "pairs": str(args.pairs),
+            "attribution": str(args.attribution),
+            "topk": args.topk,
+            "swap_batch_size": args.swap_batch_size,
+            "remove_batches": remove_batches,
+            "add_batches": add_batches,
+            "ablation": args.ablation,
+            "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+            "mlp_mask": mlp_info,
+        },
+    )
+
+    aggregate = {
+        "run_name": args.run_name,
+        "model": args.model,
+        "adapter": args.adapter,
+        "pairs": str(args.pairs),
+        "attribution": str(args.attribution),
+        "topk": args.topk,
+        "swap_batch_size": args.swap_batch_size,
+        "remove_batches": remove_batches,
+        "add_batches": add_batches,
+        "ablation": args.ablation,
+        "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+        "mlp_mask": mlp_info,
+        "results": [],
+    }
+    receipt_files: list[Path] = []
+    mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
+    try:
+        for remove_batch in remove_batches:
+            for add_batch in add_batches:
+                keep, mask_info = make_boundary_swap_keep_mask(
+                    ov_scores=ov_scores,
+                    topk=args.topk,
+                    swap_batch_size=args.swap_batch_size,
+                    remove_batch=remove_batch,
+                    add_batch=add_batch,
+                )
+                mask_info["mlp"] = mlp_info
+                name = boundary_swap_output_name(
+                    topk=args.topk,
+                    swap_batch_size=args.swap_batch_size,
+                    remove_batch=remove_batch,
+                    add_batch=add_batch,
+                    mlp_info=mlp_info,
+                )
+                jsonl_path = output_dir / f"{name}.jsonl"
+                summary = load_resume_summary(args.resume, jsonl_path)
+                if summary is None:
+                    hooks = []
+                    try:
+                        hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+                        summary = evaluate_once(
+                            args=args,
+                            rows=rows,
+                            pairs_by_id=pairs_by_id,
+                            model=model,
+                            tokenizer=tokenizer,
+                            output=jsonl_path,
+                        )
+                    finally:
+                        for hook in hooks:
+                            hook.remove()
+                    summary.update(
+                        {
+                            "name": name,
+                            "mask": mask_info,
+                            "generations": str(jsonl_path),
+                            "summary": str(jsonl_path.with_suffix(".summary.json")),
+                        }
+                    )
+                    json_dump(jsonl_path.with_suffix(".summary.json"), summary)
+                receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
+                aggregate["results"].append(summary)
+                if run is not None:
+                    run.log(
+                        {
+                            "swap/ladder_index": len(aggregate["results"]),
+                            "swap/topk": args.topk,
+                            "swap/remove_batch": remove_batch,
+                            "swap/add_batch": add_batch,
+                            "swap/swap_batch_size": args.swap_batch_size,
+                            "swap/exact_correct": summary["exact_correct"],
+                            "swap/raw_exact_correct": summary["raw_exact_correct"],
+                            "swap/normalized_exact_correct": summary["normalized_exact_correct"],
+                            "swap/kept_ov_channels": mask_info.get("kept_ov_channels"),
+                            "swap/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                        },
+                        step=len(aggregate["results"]),
+                    )
+                print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+    finally:
+        for hook in mlp_hooks:
+            hook.remove()
+
+    aggregate_path = output_dir / "boundary_swap_summary.json"
+    json_dump(aggregate_path, aggregate)
+    print(json.dumps(aggregate, indent=2, ensure_ascii=False))
+    if run is not None:
+        log_wandb_receipts(run, name=f"{args.run_name}-attention-boundary-swap", files=[aggregate_path, *receipt_files])
+        run.finish()
+
+
 def teacher_forced_ladder(args: argparse.Namespace) -> None:
     rows = read_records(args.pairs)
     if args.limit:
@@ -1191,6 +1412,8 @@ def main() -> None:
     p.add_argument("--run-name", default="issue3-attn-mean-cache")
     p.add_argument("--limit", type=int)
     p.add_argument("--log-every", type=int, default=10)
+    p.add_argument("--mlp-attribution", type=Path)
+    p.add_argument("--mlp-topk", type=int)
     add_common_model_args(p)
     add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-mean-cache")
     p.set_defaults(func=build_mean_cache)
@@ -1222,6 +1445,30 @@ def main() -> None:
     add_common_model_args(p)
     add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-eval")
     p.set_defaults(func=eval_ladder)
+
+    p = sub.add_parser("eval-boundary-swap")
+    p.add_argument("--pairs", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--attribution", type=Path, required=True)
+    p.add_argument("--mean-cache", type=Path)
+    p.add_argument("--mlp-attribution", type=Path)
+    p.add_argument("--mlp-topk", type=int)
+    p.add_argument("--run-name", default="issue3-attn-boundary-swap")
+    p.add_argument("--topk", type=int, required=True)
+    p.add_argument("--swap-batch-size", type=int, default=4096)
+    p.add_argument("--remove-batches", default="0")
+    p.add_argument("--add-batches", default="0,1,2,3")
+    p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
+    p.add_argument("--include-unmasked", action="store_true")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--batch-size", type=int, default=4)
+    p.add_argument("--max-new-tokens", type=int, default=512)
+    p.add_argument("--bfcl-canonicalization-prompt", action="store_true")
+    p.add_argument("--normalized", action="store_true")
+    p.add_argument("--resume", action="store_true")
+    add_common_model_args(p)
+    add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-boundary-swap-eval")
+    p.set_defaults(func=eval_boundary_swap)
 
     p = sub.add_parser("teacher-forced-ladder")
     p.add_argument("--pairs", type=Path, required=True)
