@@ -70,6 +70,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--policy-kl-beta", type=float, default=1.0)
     p.add_argument("--ce-beta", type=float, default=0.1)
     p.add_argument("--kl-temperature", type=float, default=1.0)
+    p.add_argument(
+        "--teacher-mode",
+        choices=["fixed", "dynamic"],
+        default="fixed",
+        help="fixed loads a frozen full-attn teacher; dynamic preserves the original moving-teacher behavior.",
+    )
+    p.add_argument("--teacher-model", default=None, help="Teacher base model; defaults to --model.")
+    p.add_argument("--teacher-adapter", type=Path, help="Teacher adapter; defaults to --init-adapter.")
+    p.add_argument("--teacher-device", default=None, help="Teacher device when --teacher-device-map is unset; defaults to --device.")
+    p.add_argument("--teacher-device-map")
     p.add_argument("--eval-every", type=int, default=20)
     p.add_argument("--tf-eval-rows", type=int, default=64)
     p.add_argument("--save-every", type=int, default=0)
@@ -186,16 +196,33 @@ def input_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
+def load_causal_lm(model_name: str, args: argparse.Namespace, dtype: torch.dtype, *, device: str, device_map: str | None):
+    load_kwargs = {
+        "torch_dtype": dtype,
+        "attn_implementation": "eager",
+        "local_files_only": args.local_files_only,
+    }
+    if device_map:
+        load_kwargs["device_map"] = device_map
+    model = AutoModelForCausalLM.from_pretrained(model_name, **load_kwargs)
+    if not device_map:
+        model = model.to(device)
+    model.config.use_cache = False
+    return model
+
+
 def masked_student_forward(
     model,
     batch: dict[str, Any],
     *,
-    attention_keep: torch.Tensor,
+    attention_keep: torch.Tensor | None,
     mlp_keep: torch.Tensor,
     args: argparse.Namespace,
 ):
     mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
-    attn_hooks = install_attention_keep_hooks(model, attention_keep, ablation=args.attention_ablation, means=None)
+    attn_hooks = []
+    if attention_keep is not None:
+        attn_hooks = install_attention_keep_hooks(model, attention_keep, ablation=args.attention_ablation, means=None)
     try:
         return model(
             input_ids=batch["input_ids"],
@@ -227,10 +254,11 @@ def teacher_forced_probe(
     rows: list[dict[str, Any]],
     tokenizer,
     *,
-    attention_keep: torch.Tensor,
+    attention_keep: torch.Tensor | None,
     mlp_keep: torch.Tensor,
     args: argparse.Namespace,
     device: torch.device,
+    prefix: str = "tf_probe",
 ) -> dict[str, Any]:
     was_training = model.training
     model.eval()
@@ -262,11 +290,11 @@ def teacher_forced_probe(
     if was_training:
         model.train()
     return {
-        "tf_probe_examples": examples,
-        "tf_probe_target_tokens": token_total,
-        "tf_probe_target_token_accuracy": token_correct / token_total if token_total else None,
-        "tf_probe_sequence_argmax_exact": seq_correct,
-        "tf_probe_sequence_argmax_exact_accuracy": seq_correct / examples if examples else None,
+        f"{prefix}_examples": examples,
+        f"{prefix}_target_tokens": token_total,
+        f"{prefix}_target_token_accuracy": token_correct / token_total if token_total else None,
+        f"{prefix}_sequence_argmax_exact": seq_correct,
+        f"{prefix}_sequence_argmax_exact_accuracy": seq_correct / examples if examples else None,
     }
 
 
@@ -302,17 +330,7 @@ def main() -> None:
         collate_fn=lambda xs: collate(xs, tokenizer.pad_token_id),
     )
 
-    load_kwargs = {
-        "torch_dtype": dtype,
-        "attn_implementation": "eager",
-        "local_files_only": args.local_files_only,
-    }
-    if args.device_map:
-        load_kwargs["device_map"] = args.device_map
-    base = AutoModelForCausalLM.from_pretrained(args.model, **load_kwargs)
-    if not args.device_map:
-        base = base.to(args.device)
-    base.config.use_cache = False
+    base = load_causal_lm(args.model, args, dtype, device=args.device, device_map=args.device_map)
 
     if args.init_adapter:
         model = PeftModel.from_pretrained(base, args.init_adapter, local_files_only=args.local_files_only, is_trainable=True)
@@ -333,6 +351,30 @@ def main() -> None:
             model.enable_input_require_grads()
     model.train()
     model.print_trainable_parameters()
+
+    teacher_model = None
+    if args.teacher_mode == "fixed":
+        teacher_model_name = args.teacher_model or args.model
+        teacher_adapter = args.teacher_adapter or args.init_adapter
+        teacher_device = args.teacher_device or args.device
+        teacher_base = load_causal_lm(
+            teacher_model_name,
+            args,
+            dtype,
+            device=teacher_device,
+            device_map=args.teacher_device_map,
+        )
+        if teacher_adapter:
+            teacher_model = PeftModel.from_pretrained(
+                teacher_base,
+                teacher_adapter,
+                local_files_only=args.local_files_only,
+                is_trainable=False,
+            )
+        else:
+            teacher_model = teacher_base
+        teacher_model.eval()
+        teacher_model.requires_grad_(False)
 
     n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
     mlp_keep, mlp_info = load_mlp_keep_mask(
@@ -365,10 +407,14 @@ def main() -> None:
     scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, total_steps)
 
     summary: dict[str, Any] = {
-        "method": "bfcl_attention_collimation_v1",
+        "method": f"bfcl_attention_collimation_v2_{args.teacher_mode}_teacher",
         "contract": {
-            "teacher": "same trainable adapter, fixed MLP mask, full attention",
-            "student": "same trainable adapter, fixed MLP mask, fixed attention keep mask",
+            "teacher": (
+                "frozen teacher adapter, fixed MLP mask, full attention"
+                if args.teacher_mode == "fixed"
+                else "same trainable adapter, fixed MLP mask, full attention"
+            ),
+            "student": "trainable adapter, fixed MLP mask, fixed attention keep mask",
             "behavior_gate": "must evaluate with full autoregressive BFCL normalized exact after training",
         },
         "args": {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
@@ -403,10 +449,16 @@ def main() -> None:
             "mlp_mask": mlp_info,
             "attention_mask": attention_info,
             "loss": {"policy_kl_beta": args.policy_kl_beta, "ce_beta": args.ce_beta},
+            "teacher": {
+                "mode": args.teacher_mode,
+                "model": args.teacher_model or args.model,
+                "adapter": str(args.teacher_adapter or args.init_adapter) if (args.teacher_adapter or args.init_adapter) else None,
+            },
         },
     )
 
     device = input_device(model)
+    teacher_device = input_device(teacher_model) if teacher_model is not None else device
     mlp_keep = mlp_keep.to(device="cpu")
     attention_keep = attention_keep.to(device="cpu")
     start = time.time()
@@ -420,7 +472,11 @@ def main() -> None:
             if global_step >= total_steps:
                 break
             batch = move_tensor_batch(raw_batch, device)
-            teacher_logits = teacher_forward(model, batch, mlp_keep=mlp_keep)
+            if teacher_model is None:
+                teacher_logits = teacher_forward(model, batch, mlp_keep=mlp_keep)
+            else:
+                teacher_batch = batch if teacher_device == device else move_tensor_batch(raw_batch, teacher_device)
+                teacher_logits = teacher_forward(teacher_model, teacher_batch, mlp_keep=mlp_keep)
             student_logits = masked_student_forward(
                 model,
                 batch,
@@ -428,6 +484,8 @@ def main() -> None:
                 mlp_keep=mlp_keep,
                 args=args,
             )
+            if teacher_logits.device != student_logits.device:
+                teacher_logits = teacher_logits.to(student_logits.device)
             policy_kl = kl_loss(student_logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
             ce = answer_ce_loss(student_logits, batch["labels"])
             loss = args.policy_kl_beta * policy_kl + args.ce_beta * ce
@@ -466,6 +524,19 @@ def main() -> None:
                         mlp_keep=mlp_keep,
                         args=args,
                         device=device,
+                        prefix="tf_probe",
+                    )
+                )
+                row.update(
+                    teacher_forced_probe(
+                        model,
+                        rows,
+                        tokenizer,
+                        attention_keep=None,
+                        mlp_keep=mlp_keep,
+                        args=args,
+                        device=device,
+                        prefix="tf_full_attn_probe",
                     )
                 )
                 summary["logs"].append(row)
