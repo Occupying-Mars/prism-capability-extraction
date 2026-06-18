@@ -9,7 +9,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.bfcl_attention_qwen3 import make_boundary_swap_keep_mask, make_keep_mask
+from scripts.bfcl_attention_qwen3 import make_boundary_swap_keep_mask, make_keep_mask, qk_keep_masks_from_attention_keep
 
 
 def test_global_ov_mask_picks_highest_channels() -> None:
@@ -120,3 +120,21 @@ def test_boundary_swap_can_probe_deeper_outside_batches() -> None:
     assert keep.tolist() == [[True, True, False, False, False, False, True, True]]
     assert info["added_rank_start"] == 6
     assert info["added_rank_end_exclusive"] == 8
+
+
+def test_qk_keep_maps_query_heads_to_grouped_kv_heads() -> None:
+    keep = torch.zeros((1, 8), dtype=torch.bool)
+    keep[0, 2:4] = True
+
+    q_keep, k_keep, info = qk_keep_masks_from_attention_keep(
+        keep,
+        n_heads=4,
+        n_kv_heads=2,
+        head_dim=2,
+    )
+
+    assert q_keep.tolist() == keep.tolist()
+    assert k_keep.tolist() == [[True, True, False, False]]
+    assert info["q_heads_kept"] == 1
+    assert info["kv_heads_kept"] == 1
+    assert info["kv_group_size"] == 2

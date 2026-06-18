@@ -607,6 +607,52 @@ def make_keep_mask(
     raise ValueError(f"unknown unit: {unit}")
 
 
+def qk_keep_masks_from_attention_keep(
+    keep: torch.Tensor,
+    *,
+    n_heads: int,
+    n_kv_heads: int,
+    head_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    if n_heads % n_kv_heads != 0:
+        raise ValueError(f"num_attention_heads={n_heads} is not divisible by num_key_value_heads={n_kv_heads}")
+    n_layers, hidden = keep.shape
+    expected_hidden = n_heads * head_dim
+    if hidden != expected_hidden:
+        raise ValueError(f"attention keep width {hidden} != expected q width {expected_hidden}")
+    kv_group_size = n_heads // n_kv_heads
+    head_keep = keep.view(n_layers, n_heads, head_dim).any(dim=2)
+    k_keep = torch.zeros((n_layers, n_kv_heads * head_dim), dtype=torch.bool)
+    for layer_idx in range(n_layers):
+        for kv_idx in range(n_kv_heads):
+            q_start = kv_idx * kv_group_size
+            q_end = q_start + kv_group_size
+            if bool(head_keep[layer_idx, q_start:q_end].any().item()):
+                k_keep[layer_idx, kv_idx * head_dim : (kv_idx + 1) * head_dim] = True
+    return keep.clone(), k_keep, {
+        "q_heads_kept": int(head_keep.sum().item()),
+        "q_heads_total": int(head_keep.numel()),
+        "q_channels_kept": int(keep.sum().item()),
+        "q_channels_total": int(keep.numel()),
+        "kv_heads_kept": int(k_keep.view(n_layers, n_kv_heads, head_dim).any(dim=2).sum().item()),
+        "kv_heads_total": int(n_layers * n_kv_heads),
+        "k_channels_kept": int(k_keep.sum().item()),
+        "k_channels_total": int(k_keep.numel()),
+        "kv_group_size": int(kv_group_size),
+    }
+
+
+def qk_keep_masks(model, keep: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    _n_layers, n_heads, _hidden, head_dim = qwen_attention_shape(model)
+    n_kv_heads = int(getattr(model.config, "num_key_value_heads", n_heads))
+    return qk_keep_masks_from_attention_keep(
+        keep,
+        n_heads=n_heads,
+        n_kv_heads=n_kv_heads,
+        head_dim=head_dim,
+    )
+
+
 def mask_output_name(args: argparse.Namespace, topk: int, mask_info: dict[str, Any], mlp_info: dict[str, Any] | None) -> str:
     strategy = mask_info.get("mask_strategy", "global")
     strategy_tag = ""
@@ -617,9 +663,10 @@ def mask_output_name(args: argparse.Namespace, topk: int, mask_info: dict[str, A
             f"_head_scaffold_ov_hs{mask_info.get('head_scaffold_kept_heads', 0)}"
             f"_hlf{mask_info.get('head_scaffold_layer_floor', 0)}"
         )
+    site_tag = "" if getattr(args, "projection_sites", "ov") == "ov" else f"_{args.projection_sites.replace('-', '_')}"
     random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
     mlp_tag = "_mlp" if mlp_info else ""
-    return f"{args.unit}_{args.ablation}{strategy_tag}_k{topk}{mlp_tag}{random_tag}"
+    return f"{args.unit}_{args.ablation}{site_tag}{strategy_tag}_k{topk}{mlp_tag}{random_tag}"
 
 
 def make_boundary_swap_keep_mask(
@@ -730,6 +777,50 @@ def install_attention_keep_hooks(
         hooks.append(layer.self_attn.o_proj.register_forward_pre_hook(hook))
     if len(hooks) != n_layers:
         raise RuntimeError(f"installed {len(hooks)} hooks for {n_layers} layers")
+    return hooks
+
+
+def install_qk_keep_hooks(model, keep: torch.Tensor):
+    q_keep, k_keep, _info = qk_keep_masks(model, keep)
+    hooks = []
+    layers = decoder_layers(model)
+    if len(layers) != keep.shape[0]:
+        raise RuntimeError(f"qk mask has {keep.shape[0]} layers but model has {len(layers)}")
+
+    for layer_idx, layer in enumerate(layers):
+        layer_q_keep = q_keep[layer_idx].clone()
+        layer_k_keep = k_keep[layer_idx].clone()
+
+        def q_hook(_module, _inputs, output, _keep=layer_q_keep):
+            keep_dev = _keep.to(device=output.device).view(1, 1, -1)
+            return torch.where(keep_dev, output, torch.zeros_like(output))
+
+        def k_hook(_module, _inputs, output, _keep=layer_k_keep):
+            keep_dev = _keep.to(device=output.device).view(1, 1, -1)
+            return torch.where(keep_dev, output, torch.zeros_like(output))
+
+        hooks.append(layer.self_attn.q_proj.register_forward_hook(q_hook))
+        hooks.append(layer.self_attn.k_proj.register_forward_hook(k_hook))
+    return hooks
+
+
+def install_attention_projection_hooks(
+    model,
+    keep: torch.Tensor,
+    *,
+    projection_sites: str,
+    ablation: str,
+    means: torch.Tensor | None,
+):
+    if projection_sites not in {"ov", "qk", "qk-ov"}:
+        raise ValueError(f"unknown projection_sites: {projection_sites}")
+    if projection_sites in {"qk", "qk-ov"} and ablation != "zero":
+        raise ValueError("qk projection masking currently supports zero ablation only")
+    hooks = []
+    if projection_sites in {"qk", "qk-ov"}:
+        hooks.extend(install_qk_keep_hooks(model, keep))
+    if projection_sites in {"ov", "qk-ov"}:
+        hooks.extend(install_attention_keep_hooks(model, keep, ablation=ablation, means=means))
     return hooks
 
 
@@ -967,6 +1058,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
             "adapter": args.adapter,
             "unit": args.unit,
             "mask_strategy": args.mask_strategy,
+            "projection_sites": args.projection_sites,
             "topks": topks,
             "ablation": args.ablation,
             "attribution": str(args.attribution) if args.attribution else None,
@@ -987,6 +1079,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
         "pairs": str(args.pairs),
         "unit": args.unit,
         "mask_strategy": args.mask_strategy,
+        "projection_sites": args.projection_sites,
         "ablation": args.ablation,
         "attribution": str(args.attribution) if args.attribution else None,
         "mean_cache": str(args.mean_cache) if args.mean_cache else None,
@@ -1000,6 +1093,10 @@ def eval_ladder(args: argparse.Namespace) -> None:
     }
     receipt_files: list[Path] = []
     mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
+    if args.projection_sites in {"qk", "qk-ov"} and args.unit != "head":
+        raise ValueError("--projection-sites qk/qk-ov requires --unit head")
+    if args.projection_sites in {"qk", "qk-ov"} and args.ablation != "zero":
+        raise ValueError("--projection-sites qk/qk-ov supports only --ablation zero")
     try:
         for topk in topks:
             hooks = []
@@ -1012,6 +1109,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
                     "requested_topk": 0,
                     "kept_ov_channels": hidden * model.config.num_hidden_layers,
                     "mlp": mlp_info,
+                    "projection_sites": args.projection_sites,
                 }
             else:
                 if head_scores is None or ov_scores is None:
@@ -1029,13 +1127,24 @@ def eval_ladder(args: argparse.Namespace) -> None:
                     head_scaffold_multiplier=args.head_scaffold_multiplier,
                 )
                 mask_info["mlp"] = mlp_info
+                mask_info["projection_sites"] = args.projection_sites
+                if args.projection_sites in {"qk", "qk-ov"}:
+                    mask_info.update(qk_keep_masks(model, keep)[2])
+                    if args.projection_sites == "qk":
+                        mask_info["qk_only_note"] = "qk-only masks attention scores but does not remove dropped-head OV output"
                 name = mask_output_name(args, topk, mask_info, mlp_info)
             jsonl_path = output_dir / f"{name}.jsonl"
             summary = load_resume_summary(args.resume, jsonl_path)
             if summary is None:
                 try:
                     if keep is not None:
-                        hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+                        hooks = install_attention_projection_hooks(
+                            model,
+                            keep,
+                            projection_sites=args.projection_sites,
+                            ablation=args.ablation,
+                            means=means,
+                        )
                     summary = evaluate_once(
                         args=args,
                         rows=rows,
@@ -1071,6 +1180,8 @@ def eval_ladder(args: argparse.Namespace) -> None:
                         "eval/kept_ov_channels": mask_info.get("kept_ov_channels"),
                         "eval/kept_heads": mask_info.get("kept_heads"),
                         "eval/kept_heads_touched": mask_info.get("kept_heads_touched"),
+                        "eval/q_heads_kept": mask_info.get("q_heads_kept"),
+                        "eval/kv_heads_kept": mask_info.get("kv_heads_kept"),
                         "eval/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
                         "eval/layer_floor": mask_info.get("layer_floor"),
                         "eval/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
@@ -1428,6 +1539,7 @@ def main() -> None:
     p.add_argument("--run-name", default="issue3-attn-eval")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
     p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov"], default="global")
+    p.add_argument("--projection-sites", choices=["ov", "qk", "qk-ov"], default="ov")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
     p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
     p.add_argument("--layer-floor", type=int, default=0)
