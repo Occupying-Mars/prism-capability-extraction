@@ -56,6 +56,25 @@ def input_device(model) -> torch.device:
     return next(model.parameters()).device
 
 
+def decoder_root(model):
+    cur = model
+    for _ in range(8):
+        if hasattr(cur, "layers"):
+            return cur
+        for attr in ("model", "base_model"):
+            nxt = getattr(cur, attr, None)
+            if nxt is not None and nxt is not cur:
+                cur = nxt
+                break
+        else:
+            break
+    raise AttributeError("could not locate decoder .layers")
+
+
+def decoder_layers(model):
+    return list(decoder_root(model).layers)
+
+
 def load_model_and_tokenizer(args: argparse.Namespace):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -125,6 +144,7 @@ def actgrad_attribute(args: argparse.Namespace) -> None:
     model, tokenizer = load_model_and_tokenizer(args)
     device = input_device(model)
     n_layers, n_heads, hidden, head_dim = qwen_attention_shape(model)
+    mlp_keep, mlp_info = load_mlp_keep_mask(args.mlp_attribution, args.mlp_topk, (n_layers, int(model.config.intermediate_size)))
     head_scores = torch.zeros((n_layers, n_heads), dtype=torch.float32)
     ov_scores = torch.zeros((n_layers, hidden), dtype=torch.float32)
 
@@ -141,6 +161,7 @@ def actgrad_attribute(args: argparse.Namespace) -> None:
             "adapter": args.adapter,
             "examples": len(rows),
             "objective": "teacher_forced_gold_tool_call_logprob",
+            "mlp_mask": mlp_info,
             "shape": {
                 "layers": n_layers,
                 "heads": n_heads,
@@ -156,13 +177,19 @@ def actgrad_attribute(args: argparse.Namespace) -> None:
     def make_hook(layer_idx: int):
         def hook(_module, hook_args):
             act = hook_args[0]
+            replacement_args = None
+            if not act.requires_grad:
+                act = act.detach().requires_grad_(True)
+                replacement_args = (act,) + hook_args[1:]
             act.retain_grad()
             activations[layer_idx] = act
+            return replacement_args
 
         return hook
 
-    for layer_idx, layer in enumerate(model.model.layers):
+    for layer_idx, layer in enumerate(decoder_layers(model)):
         hooks.append(layer.self_attn.o_proj.register_forward_pre_hook(make_hook(layer_idx)))
+    mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
 
     started = time.time()
     try:
@@ -204,6 +231,8 @@ def actgrad_attribute(args: argparse.Namespace) -> None:
     finally:
         for hook in hooks:
             hook.remove()
+        for hook in mlp_hooks:
+            hook.remove()
 
     denom = max(len(rows), 1)
     head_scores /= denom
@@ -231,6 +260,7 @@ def actgrad_attribute(args: argparse.Namespace) -> None:
         "scores": str(args.output),
         "objective": "teacher-forced gold tool-call continuation logprob",
         "attribution": "act x grad on self_attn.o_proj input; heads are sums over their OV channel block",
+        "mlp_mask": mlp_info,
         "shape": {"layers": n_layers, "heads": n_heads, "hidden": hidden, "head_dim": head_dim},
         "top_heads": top_entries(head_scores, n_heads, args.report_topk, "head"),
         "top_ov_channels": top_entries(ov_scores, hidden, args.report_topk, "ov"),
@@ -272,7 +302,7 @@ def build_mean_cache(args: argparse.Namespace) -> None:
 
         return hook
 
-    for layer_idx, layer in enumerate(model.model.layers):
+    for layer_idx, layer in enumerate(decoder_layers(model)):
         hooks.append(layer.self_attn.o_proj.register_forward_pre_hook(make_hook(layer_idx)))
 
     run = init_wandb_run(
@@ -343,6 +373,46 @@ def load_attention_scores(path: Path) -> tuple[torch.Tensor, torch.Tensor]:
     return torch.tensor(data["head_scores"], dtype=torch.float32), torch.tensor(data["ov_scores"], dtype=torch.float32)
 
 
+def load_mlp_keep_mask(path: Path | None, topk: int | None, expected_shape: tuple[int, int]) -> tuple[torch.Tensor | None, dict[str, Any] | None]:
+    if path is None:
+        return None, None
+    data = np.load(path)
+    if "mlp_keep" in data.files:
+        keep = torch.tensor(data["mlp_keep"], dtype=torch.bool)
+        source_key = "mlp_keep"
+    elif "mask" in data.files and data["mask"].dtype == np.bool_:
+        keep = torch.tensor(data["mask"], dtype=torch.bool)
+        source_key = "mask"
+    elif "mlp_scores" in data.files:
+        scores = torch.tensor(data["mlp_scores"], dtype=torch.float32)
+        if tuple(scores.shape) != expected_shape:
+            raise ValueError(f"mlp score shape {tuple(scores.shape)} != expected {expected_shape}")
+        if topk is None:
+            raise ValueError("--mlp-topk is required when --mlp-attribution contains mlp_scores")
+        flat = scores.flatten()
+        k = min(int(topk), flat.numel())
+        idx = torch.topk(flat, k=k).indices
+        keep = torch.zeros_like(scores, dtype=torch.bool)
+        d_ffn = scores.shape[1]
+        for item in idx.tolist():
+            keep[item // d_ffn, item % d_ffn] = True
+        source_key = "mlp_scores"
+    else:
+        raise ValueError(f"{path} has no supported MLP mask key; keys={data.files}")
+    if tuple(keep.shape) != expected_shape:
+        raise ValueError(f"mlp mask shape {tuple(keep.shape)} != expected {expected_shape}")
+    kept = int(keep.sum().item())
+    return keep, {
+        "mlp_attribution": str(path),
+        "mlp_source_key": source_key,
+        "mlp_requested_topk": topk,
+        "mlp_kept": kept,
+        "mlp_total": int(keep.numel()),
+        "mlp_keep_fraction": kept / max(int(keep.numel()), 1),
+        "mlp_ablation": "zero",
+    }
+
+
 def make_keep_mask(
     *,
     head_scores: torch.Tensor,
@@ -411,7 +481,7 @@ def install_attention_keep_hooks(
     if ablation == "mean" and means is None:
         raise ValueError("mean ablation requires --mean-cache")
 
-    for layer_idx, layer in enumerate(model.model.layers):
+    for layer_idx, layer in enumerate(decoder_layers(model)):
         layer_keep = keep[layer_idx].clone()
         layer_mean = means[layer_idx].clone() if means is not None else None
 
@@ -428,6 +498,26 @@ def install_attention_keep_hooks(
         hooks.append(layer.self_attn.o_proj.register_forward_pre_hook(hook))
     if len(hooks) != n_layers:
         raise RuntimeError(f"installed {len(hooks)} hooks for {n_layers} layers")
+    return hooks
+
+
+def install_mlp_keep_hooks(model, keep: torch.Tensor | None):
+    if keep is None:
+        return []
+    hooks = []
+    n_layers, d_ffn = keep.shape
+    layers = decoder_layers(model)
+    if len(layers) != n_layers:
+        raise RuntimeError(f"mlp mask has {n_layers} layers but model has {len(layers)}")
+    for layer_idx, layer in enumerate(layers):
+        layer_keep = keep[layer_idx].clone()
+
+        def hook(_module, hook_args, _keep=layer_keep):
+            x = hook_args[0]
+            keep_dev = _keep.to(device=x.device).view(1, 1, d_ffn)
+            return (torch.where(keep_dev, x, torch.zeros_like(x)),) + hook_args[1:]
+
+        hooks.append(layer.mlp.down_proj.register_forward_pre_hook(hook))
     return hooks
 
 
@@ -624,9 +714,10 @@ def eval_ladder(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model, tokenizer = load_model_and_tokenizer(args)
-    _n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
+    n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
     head_scores, ov_scores = load_attention_scores(args.attribution) if args.attribution else (None, None)
     means = load_means(args.mean_cache, (model.config.num_hidden_layers, hidden))
+    mlp_keep, mlp_info = load_mlp_keep_mask(args.mlp_attribution, args.mlp_topk, (n_layers, int(model.config.intermediate_size)))
     topks = parse_int_list(args.topks)
     if args.include_unmasked:
         topks = [0] + topks
@@ -647,6 +738,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
             "ablation": args.ablation,
             "attribution": str(args.attribution) if args.attribution else None,
             "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+            "mlp_mask": mlp_info,
             "random_seed": args.random_seed,
         },
     )
@@ -660,68 +752,82 @@ def eval_ladder(args: argparse.Namespace) -> None:
         "ablation": args.ablation,
         "attribution": str(args.attribution) if args.attribution else None,
         "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+        "mlp_mask": mlp_info,
         "random_seed": args.random_seed,
         "results": [],
     }
     receipt_files: list[Path] = []
-    for topk in topks:
-        hooks = []
-        mask_info: dict[str, Any]
-        if topk == 0:
-            name = "unmasked"
-            mask_info = {"unit": "none", "requested_topk": 0, "kept_ov_channels": hidden * model.config.num_hidden_layers}
-        else:
-            if head_scores is None or ov_scores is None:
-                raise ValueError("--attribution is required for masked eval")
-            keep, mask_info = make_keep_mask(
-                head_scores=head_scores,
-                ov_scores=ov_scores,
-                unit=args.unit,
-                topk=topk,
-                random_seed=args.random_seed,
-            )
-            hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
-            random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
-            name = f"{args.unit}_{args.ablation}_k{topk}{random_tag}"
-        try:
-            jsonl_path = output_dir / f"{name}.jsonl"
-            summary = evaluate_once(
-                args=args,
-                rows=rows,
-                pairs_by_id=pairs_by_id,
-                model=model,
-                tokenizer=tokenizer,
-                output=jsonl_path,
-            )
-        finally:
-            for hook in hooks:
-                hook.remove()
-        summary.update(
-            {
-                "name": name,
-                "mask": mask_info,
-                "generations": str(jsonl_path),
-                "summary": str(jsonl_path.with_suffix(".summary.json")),
-            }
-        )
-        json_dump(jsonl_path.with_suffix(".summary.json"), summary)
-        receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
-        aggregate["results"].append(summary)
-        if run is not None:
-            run.log(
+    mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
+    try:
+        for topk in topks:
+            hooks = []
+            mask_info: dict[str, Any]
+            if topk == 0:
+                name = "mlp_substrate_only" if mlp_info else "unmasked"
+                mask_info = {
+                    "unit": "none",
+                    "requested_topk": 0,
+                    "kept_ov_channels": hidden * model.config.num_hidden_layers,
+                    "mlp": mlp_info,
+                }
+            else:
+                if head_scores is None or ov_scores is None:
+                    raise ValueError("--attribution is required for masked eval")
+                keep, mask_info = make_keep_mask(
+                    head_scores=head_scores,
+                    ov_scores=ov_scores,
+                    unit=args.unit,
+                    topk=topk,
+                    random_seed=args.random_seed,
+                )
+                mask_info["mlp"] = mlp_info
+                hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+                random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
+                mlp_tag = "_mlp" if mlp_info else ""
+                name = f"{args.unit}_{args.ablation}_k{topk}{mlp_tag}{random_tag}"
+            try:
+                jsonl_path = output_dir / f"{name}.jsonl"
+                summary = evaluate_once(
+                    args=args,
+                    rows=rows,
+                    pairs_by_id=pairs_by_id,
+                    model=model,
+                    tokenizer=tokenizer,
+                    output=jsonl_path,
+                )
+            finally:
+                for hook in hooks:
+                    hook.remove()
+            summary.update(
                 {
-                    "eval/topk": topk,
-                    "eval/exact_correct": summary["exact_correct"],
-                    "eval/exact_accuracy": summary["exact_accuracy"],
-                    "eval/raw_exact_correct": summary["raw_exact_correct"],
-                    "eval/normalized_exact_correct": summary["normalized_exact_correct"],
-                    "eval/recovery_vs_full_anchor": summary["recovery_vs_full_anchor"],
-                    "eval/kept_ov_channels": mask_info.get("kept_ov_channels"),
-                    "eval/kept_heads": mask_info.get("kept_heads"),
-                },
-                step=max(topk, len(aggregate["results"])),
+                    "name": name,
+                    "mask": mask_info,
+                    "generations": str(jsonl_path),
+                    "summary": str(jsonl_path.with_suffix(".summary.json")),
+                }
             )
-        print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+            json_dump(jsonl_path.with_suffix(".summary.json"), summary)
+            receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
+            aggregate["results"].append(summary)
+            if run is not None:
+                run.log(
+                    {
+                        "eval/topk": topk,
+                        "eval/exact_correct": summary["exact_correct"],
+                        "eval/exact_accuracy": summary["exact_accuracy"],
+                        "eval/raw_exact_correct": summary["raw_exact_correct"],
+                        "eval/normalized_exact_correct": summary["normalized_exact_correct"],
+                        "eval/recovery_vs_full_anchor": summary["recovery_vs_full_anchor"],
+                        "eval/kept_ov_channels": mask_info.get("kept_ov_channels"),
+                        "eval/kept_heads": mask_info.get("kept_heads"),
+                        "eval/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                    },
+                    step=max(topk, len(aggregate["results"])),
+                )
+            print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+    finally:
+        for hook in mlp_hooks:
+            hook.remove()
 
     aggregate_path = output_dir / "ladder_summary.json"
     json_dump(aggregate_path, aggregate)
@@ -740,9 +846,10 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     model, tokenizer = load_model_and_tokenizer(args)
-    _n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
+    n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
     head_scores, ov_scores = load_attention_scores(args.attribution) if args.attribution else (None, None)
     means = load_means(args.mean_cache, (model.config.num_hidden_layers, hidden))
+    mlp_keep, mlp_info = load_mlp_keep_mask(args.mlp_attribution, args.mlp_topk, (n_layers, int(model.config.intermediate_size)))
     topks = parse_int_list(args.topks)
     if args.include_unmasked:
         topks = [0] + topks
@@ -763,6 +870,7 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
             "ablation": args.ablation,
             "attribution": str(args.attribution) if args.attribution else None,
             "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+            "mlp_mask": mlp_info,
             "random_seed": args.random_seed,
         },
     )
@@ -776,67 +884,81 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
         "ablation": args.ablation,
         "attribution": str(args.attribution) if args.attribution else None,
         "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+        "mlp_mask": mlp_info,
         "random_seed": args.random_seed,
         "metric": "teacher_forced_gold_tool_call_target",
         "results": [],
     }
     receipt_files: list[Path] = []
-    for topk in topks:
-        hooks = []
-        if topk == 0:
-            name = "unmasked"
-            mask_info = {"unit": "none", "requested_topk": 0, "kept_ov_channels": hidden * model.config.num_hidden_layers}
-        else:
-            if head_scores is None or ov_scores is None:
-                raise ValueError("--attribution is required for masked teacher-forced eval")
-            keep, mask_info = make_keep_mask(
-                head_scores=head_scores,
-                ov_scores=ov_scores,
-                unit=args.unit,
-                topk=topk,
-                random_seed=args.random_seed,
-            )
-            hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
-            random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
-            name = f"{args.unit}_{args.ablation}_k{topk}{random_tag}"
-        try:
-            jsonl_path = output_dir / f"{name}.teacher_forced.jsonl"
-            summary = teacher_forced_once(
-                args=args,
-                rows=rows,
-                pairs_by_id=pairs_by_id,
-                model=model,
-                tokenizer=tokenizer,
-                output=jsonl_path,
-            )
-        finally:
-            for hook in hooks:
-                hook.remove()
-        summary.update(
-            {
-                "name": name,
-                "mask": mask_info,
-                "records": str(jsonl_path),
-                "summary": str(jsonl_path.with_suffix(".summary.json")),
-            }
-        )
-        json_dump(jsonl_path.with_suffix(".summary.json"), summary)
-        receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
-        aggregate["results"].append(summary)
-        if run is not None:
-            run.log(
+    mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
+    try:
+        for topk in topks:
+            hooks = []
+            if topk == 0:
+                name = "mlp_substrate_only" if mlp_info else "unmasked"
+                mask_info = {
+                    "unit": "none",
+                    "requested_topk": 0,
+                    "kept_ov_channels": hidden * model.config.num_hidden_layers,
+                    "mlp": mlp_info,
+                }
+            else:
+                if head_scores is None or ov_scores is None:
+                    raise ValueError("--attribution is required for masked teacher-forced eval")
+                keep, mask_info = make_keep_mask(
+                    head_scores=head_scores,
+                    ov_scores=ov_scores,
+                    unit=args.unit,
+                    topk=topk,
+                    random_seed=args.random_seed,
+                )
+                mask_info["mlp"] = mlp_info
+                hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+                random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
+                mlp_tag = "_mlp" if mlp_info else ""
+                name = f"{args.unit}_{args.ablation}_k{topk}{mlp_tag}{random_tag}"
+            try:
+                jsonl_path = output_dir / f"{name}.teacher_forced.jsonl"
+                summary = teacher_forced_once(
+                    args=args,
+                    rows=rows,
+                    pairs_by_id=pairs_by_id,
+                    model=model,
+                    tokenizer=tokenizer,
+                    output=jsonl_path,
+                )
+            finally:
+                for hook in hooks:
+                    hook.remove()
+            summary.update(
                 {
-                    "tf/topk": topk,
-                    "tf/target_token_accuracy": summary["target_token_accuracy"],
-                    "tf/sequence_argmax_exact_accuracy": summary["sequence_argmax_exact_accuracy"],
-                    "tf/mean_target_logprob": summary["mean_target_logprob"],
-                    "tf/mean_target_token_logprob": summary["mean_target_token_logprob"],
-                    "tf/kept_ov_channels": mask_info.get("kept_ov_channels"),
-                    "tf/kept_heads": mask_info.get("kept_heads"),
-                },
-                step=max(topk, len(aggregate["results"])),
+                    "name": name,
+                    "mask": mask_info,
+                    "records": str(jsonl_path),
+                    "summary": str(jsonl_path.with_suffix(".summary.json")),
+                }
             )
-        print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+            json_dump(jsonl_path.with_suffix(".summary.json"), summary)
+            receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
+            aggregate["results"].append(summary)
+            if run is not None:
+                run.log(
+                    {
+                        "tf/topk": topk,
+                        "tf/target_token_accuracy": summary["target_token_accuracy"],
+                        "tf/sequence_argmax_exact_accuracy": summary["sequence_argmax_exact_accuracy"],
+                        "tf/mean_target_logprob": summary["mean_target_logprob"],
+                        "tf/mean_target_token_logprob": summary["mean_target_token_logprob"],
+                        "tf/kept_ov_channels": mask_info.get("kept_ov_channels"),
+                        "tf/kept_heads": mask_info.get("kept_heads"),
+                        "tf/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                    },
+                    step=max(topk, len(aggregate["results"])),
+                )
+            print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+    finally:
+        for hook in mlp_hooks:
+            hook.remove()
 
     aggregate_path = output_dir / "teacher_forced_ladder_summary.json"
     json_dump(aggregate_path, aggregate)
@@ -869,6 +991,8 @@ def main() -> None:
     p.add_argument("--log-every", type=int, default=10)
     p.add_argument("--report-topk", type=int, default=30)
     p.add_argument("--empty-cache-every", type=int, default=25)
+    p.add_argument("--mlp-attribution", type=Path)
+    p.add_argument("--mlp-topk", type=int)
     add_common_model_args(p)
     add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-actgrad")
     p.set_defaults(func=actgrad_attribute)
@@ -888,6 +1012,8 @@ def main() -> None:
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--attribution", type=Path)
     p.add_argument("--mean-cache", type=Path)
+    p.add_argument("--mlp-attribution", type=Path)
+    p.add_argument("--mlp-topk", type=int)
     p.add_argument("--run-name", default="issue3-attn-eval")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
@@ -908,6 +1034,8 @@ def main() -> None:
     p.add_argument("--output-dir", type=Path, required=True)
     p.add_argument("--attribution", type=Path)
     p.add_argument("--mean-cache", type=Path)
+    p.add_argument("--mlp-attribution", type=Path)
+    p.add_argument("--mlp-topk", type=int)
     p.add_argument("--run-name", default="issue3-attn-teacher-forced")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
