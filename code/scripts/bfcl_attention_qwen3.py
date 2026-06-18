@@ -511,13 +511,14 @@ def make_keep_mask(
     head_scaffold_topk: int | None = None,
     head_scaffold_layer_floor: int = 0,
     head_scaffold_multiplier: float = 2.0,
+    n_kv_heads: int | None = None,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     n_layers, n_heads = head_scores.shape
     hidden = ov_scores.shape[1]
     head_dim = hidden // n_heads
     keep = torch.zeros((n_layers, hidden), dtype=torch.bool)
 
-    if mask_strategy not in {"global", "layer-balanced", "head-scaffold-ov"}:
+    if mask_strategy not in {"global", "layer-balanced", "head-scaffold-ov", "kv-group"}:
         raise ValueError(f"unknown mask strategy: {mask_strategy}")
     if layer_floor < 0:
         raise ValueError("--layer-floor must be non-negative")
@@ -527,6 +528,36 @@ def make_keep_mask(
     if unit == "head":
         if mask_strategy == "head-scaffold-ov":
             raise ValueError("head-scaffold-ov requires --unit ov")
+        if mask_strategy == "kv-group":
+            if n_kv_heads is None:
+                raise ValueError("kv-group head masking requires num_key_value_heads")
+            if n_heads % n_kv_heads != 0:
+                raise ValueError(f"num_attention_heads={n_heads} is not divisible by num_key_value_heads={n_kv_heads}")
+            kv_group_size = n_heads // n_kv_heads
+            group_scores = head_scores.view(n_layers, n_kv_heads, kv_group_size).sum(dim=2)
+            requested_groups = ceil(max(topk, 0) / max(kv_group_size, 1))
+            group_indices = pick_indices(
+                group_scores,
+                k=min(requested_groups, group_scores.numel()),
+                random_seed=random_seed,
+            )
+            for item in group_indices:
+                layer = item // n_kv_heads
+                kv_group = item % n_kv_heads
+                q_start = kv_group * kv_group_size
+                q_end = q_start + kv_group_size
+                keep[layer, q_start * head_dim : q_end * head_dim] = True
+            kept_heads = int(len(group_indices) * kv_group_size)
+            return keep, {
+                "unit": "head",
+                "mask_strategy": "kv-group",
+                "requested_topk": topk,
+                "requested_kv_groups": int(requested_groups),
+                "kept_kv_groups": int(len(group_indices)),
+                "kv_group_size": int(kv_group_size),
+                "kept_heads": kept_heads,
+                "kept_ov_channels": int(keep.sum().item()),
+            }
         total = n_layers * n_heads
         k = min(topk, total)
         if mask_strategy == "layer-balanced":
@@ -552,6 +583,8 @@ def make_keep_mask(
         }
 
     if unit == "ov":
+        if mask_strategy == "kv-group":
+            raise ValueError("kv-group requires --unit head")
         total = ov_scores.numel()
         k = min(topk, total)
         if mask_strategy == "layer-balanced":
@@ -663,6 +696,8 @@ def mask_output_name(args: argparse.Namespace, topk: int, mask_info: dict[str, A
             f"_head_scaffold_ov_hs{mask_info.get('head_scaffold_kept_heads', 0)}"
             f"_hlf{mask_info.get('head_scaffold_layer_floor', 0)}"
         )
+    elif strategy == "kv-group":
+        strategy_tag = f"_kv_group_g{mask_info.get('kept_kv_groups', 0)}"
     site_tag = "" if getattr(args, "projection_sites", "ov") == "ov" else f"_{args.projection_sites.replace('-', '_')}"
     random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
     mlp_tag = "_mlp" if mlp_info else ""
@@ -1125,6 +1160,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
                     head_scaffold_topk=args.head_scaffold_topk,
                     head_scaffold_layer_floor=args.head_scaffold_layer_floor,
                     head_scaffold_multiplier=args.head_scaffold_multiplier,
+                    n_kv_heads=int(getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)),
                 )
                 mask_info["mlp"] = mlp_info
                 mask_info["projection_sites"] = args.projection_sites
@@ -1426,6 +1462,7 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
                     head_scaffold_topk=args.head_scaffold_topk,
                     head_scaffold_layer_floor=args.head_scaffold_layer_floor,
                     head_scaffold_multiplier=args.head_scaffold_multiplier,
+                    n_kv_heads=int(getattr(model.config, "num_key_value_heads", model.config.num_attention_heads)),
                 )
                 mask_info["mlp"] = mlp_info
                 name = mask_output_name(args, topk, mask_info, mlp_info)
@@ -1538,7 +1575,7 @@ def main() -> None:
     p.add_argument("--mlp-topk", type=int)
     p.add_argument("--run-name", default="issue3-attn-eval")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
-    p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov"], default="global")
+    p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov", "kv-group"], default="global")
     p.add_argument("--projection-sites", choices=["ov", "qk", "qk-ov"], default="ov")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
     p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
@@ -1591,7 +1628,7 @@ def main() -> None:
     p.add_argument("--mlp-topk", type=int)
     p.add_argument("--run-name", default="issue3-attn-teacher-forced")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
-    p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov"], default="global")
+    p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov", "kv-group"], default="global")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
     p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
     p.add_argument("--layer-floor", type=int, default=0)

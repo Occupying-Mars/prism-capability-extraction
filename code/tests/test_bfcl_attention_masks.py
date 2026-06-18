@@ -138,3 +138,23 @@ def test_qk_keep_maps_query_heads_to_grouped_kv_heads() -> None:
     assert info["q_heads_kept"] == 1
     assert info["kv_heads_kept"] == 1
     assert info["kv_group_size"] == 2
+
+
+def test_kv_group_head_mask_keeps_whole_query_groups() -> None:
+    head_scores = torch.tensor([[1.0, 2.0, 10.0, 20.0]], dtype=torch.float32)
+    ov_scores = torch.zeros((1, 8), dtype=torch.float32)
+
+    keep, info = make_keep_mask(
+        head_scores=head_scores,
+        ov_scores=ov_scores,
+        unit="head",
+        topk=2,
+        random_seed=None,
+        mask_strategy="kv-group",
+        n_kv_heads=2,
+    )
+
+    assert keep.tolist() == [[False, False, False, False, True, True, True, True]]
+    assert info["kept_kv_groups"] == 1
+    assert info["kept_heads"] == 2
+    assert info["kept_ov_channels"] == 4
