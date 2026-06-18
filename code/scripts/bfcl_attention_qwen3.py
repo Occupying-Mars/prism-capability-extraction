@@ -9,6 +9,7 @@ import random
 import sys
 import time
 from collections import Counter, defaultdict
+from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -145,6 +146,64 @@ def top_entries(scores: torch.Tensor, width: int, k: int, kind: str) -> list[dic
         key = "head" if kind == "head" else "channel"
         out.append({"layer": layer, key: unit, "score": float(val.item())})
     return out
+
+
+def pick_indices(
+    scores: torch.Tensor,
+    *,
+    k: int,
+    random_seed: int | None,
+    already_chosen: set[int] | None = None,
+) -> list[int]:
+    total = scores.numel()
+    if k <= 0 or total == 0:
+        return []
+    chosen = already_chosen or set()
+    flat = scores.flatten()
+    candidates = [idx for idx in range(total) if idx not in chosen and bool(torch.isfinite(flat[idx]).item())]
+    if not candidates:
+        return []
+    k = min(k, len(candidates))
+    if random_seed is not None:
+        return random.Random(random_seed).sample(candidates, k)
+
+    masked = flat.clone()
+    if chosen:
+        masked[list(chosen)] = -torch.inf
+    return torch.topk(masked, k=k).indices.tolist()
+
+
+def pick_layer_balanced_indices(
+    scores: torch.Tensor,
+    *,
+    k: int,
+    layer_floor: int,
+    random_seed: int | None,
+) -> list[int]:
+    n_layers, width = scores.shape
+    if k <= 0:
+        return []
+    if layer_floor <= 0:
+        return pick_indices(scores, k=k, random_seed=random_seed)
+
+    rng = random.Random(random_seed) if random_seed is not None else None
+    chosen: set[int] = set()
+    floor = min(layer_floor, width)
+    for layer in range(n_layers):
+        remaining = k - len(chosen)
+        if remaining <= 0:
+            break
+        take = min(floor, width, remaining)
+        if rng is None:
+            layer_items = torch.topk(scores[layer], k=take).indices.tolist()
+        else:
+            layer_items = rng.sample(range(width), take)
+        chosen.update(layer * width + item for item in layer_items)
+
+    remaining = k - len(chosen)
+    if remaining > 0:
+        chosen.update(pick_indices(scores, k=remaining, random_seed=random_seed, already_chosen=chosen))
+    return list(chosen)
 
 
 def actgrad_attribute(args: argparse.Namespace) -> None:
@@ -431,44 +490,120 @@ def make_keep_mask(
     unit: str,
     topk: int,
     random_seed: int | None,
+    mask_strategy: str = "global",
+    layer_floor: int = 0,
+    head_scaffold_topk: int | None = None,
+    head_scaffold_layer_floor: int = 0,
+    head_scaffold_multiplier: float = 2.0,
 ) -> tuple[torch.Tensor, dict[str, Any]]:
     n_layers, n_heads = head_scores.shape
     hidden = ov_scores.shape[1]
     head_dim = hidden // n_heads
     keep = torch.zeros((n_layers, hidden), dtype=torch.bool)
-    rng = random.Random(random_seed) if random_seed is not None else None
+
+    if mask_strategy not in {"global", "layer-balanced", "head-scaffold-ov"}:
+        raise ValueError(f"unknown mask strategy: {mask_strategy}")
+    if layer_floor < 0:
+        raise ValueError("--layer-floor must be non-negative")
+    if head_scaffold_layer_floor < 0:
+        raise ValueError("--head-scaffold-layer-floor must be non-negative")
 
     if unit == "head":
+        if mask_strategy == "head-scaffold-ov":
+            raise ValueError("head-scaffold-ov requires --unit ov")
         total = n_layers * n_heads
         k = min(topk, total)
-        if rng is None:
-            indices = torch.topk(head_scores.flatten(), k=k).indices.tolist()
+        if mask_strategy == "layer-balanced":
+            indices = pick_layer_balanced_indices(
+                head_scores,
+                k=k,
+                layer_floor=layer_floor,
+                random_seed=random_seed,
+            )
         else:
-            indices = rng.sample(range(total), k)
+            indices = pick_indices(head_scores, k=k, random_seed=random_seed)
         for item in indices:
             layer = item // n_heads
             head = item % n_heads
             keep[layer, head * head_dim : (head + 1) * head_dim] = True
-        return keep, {"unit": "head", "requested_topk": topk, "kept_heads": k, "kept_ov_channels": int(keep.sum().item())}
+        return keep, {
+            "unit": "head",
+            "mask_strategy": mask_strategy,
+            "requested_topk": topk,
+            "layer_floor": layer_floor if mask_strategy == "layer-balanced" else 0,
+            "kept_heads": int(len(indices)),
+            "kept_ov_channels": int(keep.sum().item()),
+        }
 
     if unit == "ov":
         total = ov_scores.numel()
         k = min(topk, total)
-        if rng is None:
-            indices = torch.topk(ov_scores.flatten(), k=k).indices.tolist()
+        if mask_strategy == "layer-balanced":
+            indices = pick_layer_balanced_indices(
+                ov_scores,
+                k=k,
+                layer_floor=layer_floor,
+                random_seed=random_seed,
+            )
+            scaffold_info: dict[str, Any] = {}
+        elif mask_strategy == "head-scaffold-ov":
+            if head_scaffold_topk is None:
+                min_heads_for_capacity = ceil(k / max(head_dim, 1))
+                head_scaffold_topk = int(ceil(min_heads_for_capacity * head_scaffold_multiplier))
+            scaffold_heads = pick_layer_balanced_indices(
+                head_scores,
+                k=min(head_scaffold_topk, head_scores.numel()),
+                layer_floor=head_scaffold_layer_floor,
+                random_seed=random_seed,
+            )
+            candidate_scores = torch.full_like(ov_scores, -torch.inf)
+            for item in scaffold_heads:
+                layer = item // n_heads
+                head = item % n_heads
+                start = head * head_dim
+                candidate_scores[layer, start : start + head_dim] = ov_scores[layer, start : start + head_dim]
+            candidates = int(torch.isfinite(candidate_scores).sum().item())
+            indices = pick_indices(candidate_scores, k=min(k, candidates), random_seed=random_seed)
+            scaffold_info = {
+                "head_scaffold_topk": int(head_scaffold_topk),
+                "head_scaffold_kept_heads": int(len(scaffold_heads)),
+                "head_scaffold_layer_floor": head_scaffold_layer_floor,
+                "head_scaffold_multiplier": head_scaffold_multiplier,
+                "head_scaffold_candidate_ov_channels": candidates,
+            }
         else:
-            indices = rng.sample(range(total), k)
+            indices = pick_indices(ov_scores, k=k, random_seed=random_seed)
+            scaffold_info = {}
         for item in indices:
             keep[item // hidden, item % hidden] = True
         kept_heads_touched = int(sum(keep[layer].view(n_heads, head_dim).any(dim=1).sum().item() for layer in range(n_layers)))
-        return keep, {
+        info = {
             "unit": "ov",
+            "mask_strategy": mask_strategy,
             "requested_topk": topk,
+            "layer_floor": layer_floor if mask_strategy == "layer-balanced" else 0,
             "kept_heads_touched": kept_heads_touched,
             "kept_ov_channels": int(keep.sum().item()),
         }
+        info.update(scaffold_info)
+        return keep, info
 
     raise ValueError(f"unknown unit: {unit}")
+
+
+def mask_output_name(args: argparse.Namespace, topk: int, mask_info: dict[str, Any], mlp_info: dict[str, Any] | None) -> str:
+    strategy = mask_info.get("mask_strategy", "global")
+    strategy_tag = ""
+    if strategy == "layer-balanced":
+        strategy_tag = f"_layer_balanced_lf{mask_info.get('layer_floor', 0)}"
+    elif strategy == "head-scaffold-ov":
+        strategy_tag = (
+            f"_head_scaffold_ov_hs{mask_info.get('head_scaffold_kept_heads', 0)}"
+            f"_hlf{mask_info.get('head_scaffold_layer_floor', 0)}"
+        )
+    random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
+    mlp_tag = "_mlp" if mlp_info else ""
+    return f"{args.unit}_{args.ablation}{strategy_tag}_k{topk}{mlp_tag}{random_tag}"
 
 
 def load_means(path: Path | None, expected_shape: tuple[int, int]) -> torch.Tensor | None:
@@ -745,12 +880,17 @@ def eval_ladder(args: argparse.Namespace) -> None:
             "model": args.model,
             "adapter": args.adapter,
             "unit": args.unit,
+            "mask_strategy": args.mask_strategy,
             "topks": topks,
             "ablation": args.ablation,
             "attribution": str(args.attribution) if args.attribution else None,
             "mean_cache": str(args.mean_cache) if args.mean_cache else None,
             "mlp_mask": mlp_info,
             "random_seed": args.random_seed,
+            "layer_floor": args.layer_floor,
+            "head_scaffold_topk": args.head_scaffold_topk,
+            "head_scaffold_layer_floor": args.head_scaffold_layer_floor,
+            "head_scaffold_multiplier": args.head_scaffold_multiplier,
         },
     )
 
@@ -760,11 +900,16 @@ def eval_ladder(args: argparse.Namespace) -> None:
         "adapter": args.adapter,
         "pairs": str(args.pairs),
         "unit": args.unit,
+        "mask_strategy": args.mask_strategy,
         "ablation": args.ablation,
         "attribution": str(args.attribution) if args.attribution else None,
         "mean_cache": str(args.mean_cache) if args.mean_cache else None,
         "mlp_mask": mlp_info,
         "random_seed": args.random_seed,
+        "layer_floor": args.layer_floor,
+        "head_scaffold_topk": args.head_scaffold_topk,
+        "head_scaffold_layer_floor": args.head_scaffold_layer_floor,
+        "head_scaffold_multiplier": args.head_scaffold_multiplier,
         "results": [],
     }
     receipt_files: list[Path] = []
@@ -791,11 +936,14 @@ def eval_ladder(args: argparse.Namespace) -> None:
                     unit=args.unit,
                     topk=topk,
                     random_seed=args.random_seed,
+                    mask_strategy=args.mask_strategy,
+                    layer_floor=args.layer_floor,
+                    head_scaffold_topk=args.head_scaffold_topk,
+                    head_scaffold_layer_floor=args.head_scaffold_layer_floor,
+                    head_scaffold_multiplier=args.head_scaffold_multiplier,
                 )
                 mask_info["mlp"] = mlp_info
-                random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
-                mlp_tag = "_mlp" if mlp_info else ""
-                name = f"{args.unit}_{args.ablation}_k{topk}{mlp_tag}{random_tag}"
+                name = mask_output_name(args, topk, mask_info, mlp_info)
             jsonl_path = output_dir / f"{name}.jsonl"
             summary = load_resume_summary(args.resume, jsonl_path)
             if summary is None:
@@ -835,7 +983,10 @@ def eval_ladder(args: argparse.Namespace) -> None:
                         "eval/recovery_vs_full_anchor": summary["recovery_vs_full_anchor"],
                         "eval/kept_ov_channels": mask_info.get("kept_ov_channels"),
                         "eval/kept_heads": mask_info.get("kept_heads"),
+                        "eval/kept_heads_touched": mask_info.get("kept_heads_touched"),
                         "eval/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                        "eval/layer_floor": mask_info.get("layer_floor"),
+                        "eval/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
                     },
                     step=max(topk, len(aggregate["results"])),
                 )
@@ -881,12 +1032,17 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
             "model": args.model,
             "adapter": args.adapter,
             "unit": args.unit,
+            "mask_strategy": args.mask_strategy,
             "topks": topks,
             "ablation": args.ablation,
             "attribution": str(args.attribution) if args.attribution else None,
             "mean_cache": str(args.mean_cache) if args.mean_cache else None,
             "mlp_mask": mlp_info,
             "random_seed": args.random_seed,
+            "layer_floor": args.layer_floor,
+            "head_scaffold_topk": args.head_scaffold_topk,
+            "head_scaffold_layer_floor": args.head_scaffold_layer_floor,
+            "head_scaffold_multiplier": args.head_scaffold_multiplier,
         },
     )
 
@@ -896,11 +1052,16 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
         "adapter": args.adapter,
         "pairs": str(args.pairs),
         "unit": args.unit,
+        "mask_strategy": args.mask_strategy,
         "ablation": args.ablation,
         "attribution": str(args.attribution) if args.attribution else None,
         "mean_cache": str(args.mean_cache) if args.mean_cache else None,
         "mlp_mask": mlp_info,
         "random_seed": args.random_seed,
+        "layer_floor": args.layer_floor,
+        "head_scaffold_topk": args.head_scaffold_topk,
+        "head_scaffold_layer_floor": args.head_scaffold_layer_floor,
+        "head_scaffold_multiplier": args.head_scaffold_multiplier,
         "metric": "teacher_forced_gold_tool_call_target",
         "results": [],
     }
@@ -927,11 +1088,14 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
                     unit=args.unit,
                     topk=topk,
                     random_seed=args.random_seed,
+                    mask_strategy=args.mask_strategy,
+                    layer_floor=args.layer_floor,
+                    head_scaffold_topk=args.head_scaffold_topk,
+                    head_scaffold_layer_floor=args.head_scaffold_layer_floor,
+                    head_scaffold_multiplier=args.head_scaffold_multiplier,
                 )
                 mask_info["mlp"] = mlp_info
-                random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
-                mlp_tag = "_mlp" if mlp_info else ""
-                name = f"{args.unit}_{args.ablation}_k{topk}{mlp_tag}{random_tag}"
+                name = mask_output_name(args, topk, mask_info, mlp_info)
             jsonl_path = output_dir / f"{name}.teacher_forced.jsonl"
             summary = load_resume_summary(args.resume, jsonl_path)
             if summary is None:
@@ -970,7 +1134,10 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
                         "tf/mean_target_token_logprob": summary["mean_target_token_logprob"],
                         "tf/kept_ov_channels": mask_info.get("kept_ov_channels"),
                         "tf/kept_heads": mask_info.get("kept_heads"),
+                        "tf/kept_heads_touched": mask_info.get("kept_heads_touched"),
                         "tf/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                        "tf/layer_floor": mask_info.get("layer_floor"),
+                        "tf/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
                     },
                     step=max(topk, len(aggregate["results"])),
                 )
@@ -1035,8 +1202,13 @@ def main() -> None:
     p.add_argument("--mlp-topk", type=int)
     p.add_argument("--run-name", default="issue3-attn-eval")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
+    p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov"], default="global")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
     p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
+    p.add_argument("--layer-floor", type=int, default=0)
+    p.add_argument("--head-scaffold-topk", type=int)
+    p.add_argument("--head-scaffold-layer-floor", type=int, default=0)
+    p.add_argument("--head-scaffold-multiplier", type=float, default=2.0)
     p.add_argument("--random-seed", type=int)
     p.add_argument("--include-unmasked", action="store_true")
     p.add_argument("--limit", type=int)
@@ -1058,8 +1230,13 @@ def main() -> None:
     p.add_argument("--mlp-topk", type=int)
     p.add_argument("--run-name", default="issue3-attn-teacher-forced")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
+    p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov"], default="global")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
     p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
+    p.add_argument("--layer-floor", type=int, default=0)
+    p.add_argument("--head-scaffold-topk", type=int)
+    p.add_argument("--head-scaffold-layer-floor", type=int, default=0)
+    p.add_argument("--head-scaffold-multiplier", type=float, default=2.0)
     p.add_argument("--random-seed", type=int)
     p.add_argument("--include-unmasked", action="store_true")
     p.add_argument("--limit", type=int)
