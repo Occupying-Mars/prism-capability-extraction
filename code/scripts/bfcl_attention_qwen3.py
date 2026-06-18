@@ -39,6 +39,17 @@ def json_dump(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
 
 
+def load_resume_summary(enabled: bool, jsonl_path: Path) -> dict[str, Any] | None:
+    summary_path = jsonl_path.with_suffix(".summary.json")
+    if not enabled:
+        return None
+    if not summary_path.exists() or not jsonl_path.exists():
+        return None
+    summary = json.loads(summary_path.read_text())
+    print(f"resume: using existing {summary_path}", flush=True)
+    return summary
+
+
 def parse_int_list(value: str | None) -> list[int]:
     if not value:
         return []
@@ -762,6 +773,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
         for topk in topks:
             hooks = []
             mask_info: dict[str, Any]
+            keep = None
             if topk == 0:
                 name = "mlp_substrate_only" if mlp_info else "unmasked"
                 mask_info = {
@@ -781,32 +793,35 @@ def eval_ladder(args: argparse.Namespace) -> None:
                     random_seed=args.random_seed,
                 )
                 mask_info["mlp"] = mlp_info
-                hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
                 random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
                 mlp_tag = "_mlp" if mlp_info else ""
                 name = f"{args.unit}_{args.ablation}_k{topk}{mlp_tag}{random_tag}"
-            try:
-                jsonl_path = output_dir / f"{name}.jsonl"
-                summary = evaluate_once(
-                    args=args,
-                    rows=rows,
-                    pairs_by_id=pairs_by_id,
-                    model=model,
-                    tokenizer=tokenizer,
-                    output=jsonl_path,
+            jsonl_path = output_dir / f"{name}.jsonl"
+            summary = load_resume_summary(args.resume, jsonl_path)
+            if summary is None:
+                try:
+                    if keep is not None:
+                        hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+                    summary = evaluate_once(
+                        args=args,
+                        rows=rows,
+                        pairs_by_id=pairs_by_id,
+                        model=model,
+                        tokenizer=tokenizer,
+                        output=jsonl_path,
+                    )
+                finally:
+                    for hook in hooks:
+                        hook.remove()
+                summary.update(
+                    {
+                        "name": name,
+                        "mask": mask_info,
+                        "generations": str(jsonl_path),
+                        "summary": str(jsonl_path.with_suffix(".summary.json")),
+                    }
                 )
-            finally:
-                for hook in hooks:
-                    hook.remove()
-            summary.update(
-                {
-                    "name": name,
-                    "mask": mask_info,
-                    "generations": str(jsonl_path),
-                    "summary": str(jsonl_path.with_suffix(".summary.json")),
-                }
-            )
-            json_dump(jsonl_path.with_suffix(".summary.json"), summary)
+                json_dump(jsonl_path.with_suffix(".summary.json"), summary)
             receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
             aggregate["results"].append(summary)
             if run is not None:
@@ -894,6 +909,7 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
     try:
         for topk in topks:
             hooks = []
+            keep = None
             if topk == 0:
                 name = "mlp_substrate_only" if mlp_info else "unmasked"
                 mask_info = {
@@ -913,32 +929,35 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
                     random_seed=args.random_seed,
                 )
                 mask_info["mlp"] = mlp_info
-                hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
                 random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
                 mlp_tag = "_mlp" if mlp_info else ""
                 name = f"{args.unit}_{args.ablation}_k{topk}{mlp_tag}{random_tag}"
-            try:
-                jsonl_path = output_dir / f"{name}.teacher_forced.jsonl"
-                summary = teacher_forced_once(
-                    args=args,
-                    rows=rows,
-                    pairs_by_id=pairs_by_id,
-                    model=model,
-                    tokenizer=tokenizer,
-                    output=jsonl_path,
+            jsonl_path = output_dir / f"{name}.teacher_forced.jsonl"
+            summary = load_resume_summary(args.resume, jsonl_path)
+            if summary is None:
+                try:
+                    if keep is not None:
+                        hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+                    summary = teacher_forced_once(
+                        args=args,
+                        rows=rows,
+                        pairs_by_id=pairs_by_id,
+                        model=model,
+                        tokenizer=tokenizer,
+                        output=jsonl_path,
+                    )
+                finally:
+                    for hook in hooks:
+                        hook.remove()
+                summary.update(
+                    {
+                        "name": name,
+                        "mask": mask_info,
+                        "records": str(jsonl_path),
+                        "summary": str(jsonl_path.with_suffix(".summary.json")),
+                    }
                 )
-            finally:
-                for hook in hooks:
-                    hook.remove()
-            summary.update(
-                {
-                    "name": name,
-                    "mask": mask_info,
-                    "records": str(jsonl_path),
-                    "summary": str(jsonl_path.with_suffix(".summary.json")),
-                }
-            )
-            json_dump(jsonl_path.with_suffix(".summary.json"), summary)
+                json_dump(jsonl_path.with_suffix(".summary.json"), summary)
             receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
             aggregate["results"].append(summary)
             if run is not None:
@@ -1025,6 +1044,7 @@ def main() -> None:
     p.add_argument("--max-new-tokens", type=int, default=512)
     p.add_argument("--bfcl-canonicalization-prompt", action="store_true")
     p.add_argument("--normalized", action="store_true")
+    p.add_argument("--resume", action="store_true")
     add_common_model_args(p)
     add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-eval")
     p.set_defaults(func=eval_ladder)
@@ -1044,6 +1064,7 @@ def main() -> None:
     p.add_argument("--include-unmasked", action="store_true")
     p.add_argument("--limit", type=int)
     p.add_argument("--log-every", type=int, default=25)
+    p.add_argument("--resume", action="store_true")
     add_common_model_args(p)
     add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-teacher-forced")
     p.set_defaults(func=teacher_forced_ladder)
