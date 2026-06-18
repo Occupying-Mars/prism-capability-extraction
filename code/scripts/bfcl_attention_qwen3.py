@@ -462,10 +462,101 @@ def summarize_eval_rows(rows: list[dict[str, Any]], pairs_by_id: dict[str, dict[
         "normalized_exact_correct": normalized_correct,
         "normalized_exact_accuracy": normalized_correct / judged if judged else None,
         "reported_metric": "normalized_exact" if normalized else "raw_exact",
-        "recovery_vs_full_anchor": (correct / FULL_QWEN3_BFCL_ANCHOR) if FULL_QWEN3_BFCL_ANCHOR else None,
+        "recovery_vs_full_anchor": (correct / FULL_QWEN3_BFCL_ANCHOR) if judged == 1007 else None,
         "full_anchor_normalized_exact": FULL_QWEN3_BFCL_ANCHOR,
+        "recovery_note": "score/664 is reported only for full 1007-row evals",
         "by_category": by_category,
     }
+
+
+def summarize_teacher_forced(
+    rows: list[dict[str, Any]],
+    pairs_by_id: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    examples = len(rows)
+    total_tokens = sum(int(row["target_tokens"]) for row in rows)
+    token_correct = sum(int(row["target_token_correct"]) for row in rows)
+    seq_correct = sum(int(row["target_sequence_argmax_exact"]) for row in rows)
+    total_logprob = sum(float(row["target_logprob"]) for row in rows)
+    by_category_counts: defaultdict[str, Counter] = defaultdict(Counter)
+    by_category_logprob: defaultdict[str, float] = defaultdict(float)
+    for row in rows:
+        category = pairs_by_id.get(row["id"], {}).get("category", "unknown")
+        by_category_counts[category]["examples"] += 1
+        by_category_counts[category]["tokens"] += int(row["target_tokens"])
+        by_category_counts[category]["token_correct"] += int(row["target_token_correct"])
+        by_category_counts[category]["sequence_exact"] += int(row["target_sequence_argmax_exact"])
+        by_category_logprob[category] += float(row["target_logprob"])
+    by_category: dict[str, dict[str, Any]] = {}
+    for category, counts in sorted(by_category_counts.items()):
+        tokens = int(counts["tokens"])
+        cat_examples = int(counts["examples"])
+        by_category[category] = {
+            "examples": cat_examples,
+            "target_tokens": tokens,
+            "target_token_accuracy": counts["token_correct"] / tokens if tokens else None,
+            "sequence_argmax_exact_correct": int(counts["sequence_exact"]),
+            "sequence_argmax_exact_accuracy": counts["sequence_exact"] / cat_examples if cat_examples else None,
+            "mean_target_logprob": by_category_logprob[category] / cat_examples if cat_examples else None,
+            "mean_target_token_logprob": by_category_logprob[category] / tokens if tokens else None,
+        }
+    return {
+        "examples": examples,
+        "target_tokens": total_tokens,
+        "target_token_correct": token_correct,
+        "target_token_accuracy": token_correct / total_tokens if total_tokens else None,
+        "sequence_argmax_exact_correct": seq_correct,
+        "sequence_argmax_exact_accuracy": seq_correct / examples if examples else None,
+        "mean_target_logprob": total_logprob / examples if examples else None,
+        "mean_target_token_logprob": total_logprob / total_tokens if total_tokens else None,
+        "by_category": by_category,
+    }
+
+
+def teacher_forced_once(
+    *,
+    args: argparse.Namespace,
+    rows: list[dict[str, Any]],
+    pairs_by_id: dict[str, dict[str, Any]],
+    model,
+    tokenizer,
+    output: Path,
+) -> dict[str, Any]:
+    device = input_device(model)
+    out_rows = []
+    with torch.inference_mode():
+        for i, row in enumerate(rows, start=1):
+            input_ids, attention_mask, prompt_len, target_ids = build_attr_prompt_target(
+                tokenizer, row, enable_thinking=args.enable_thinking
+            )
+            input_ids = input_ids.to(device)
+            attention_mask = attention_mask.to(device)
+            target_ids = target_ids.to(device)
+            logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+            answer_len = target_ids.shape[1]
+            positions = torch.arange(prompt_len - 1, prompt_len - 1 + answer_len, device=logits.device)
+            target_logits = logits[:, positions, :]
+            logp = torch.log_softmax(target_logits, dim=-1)
+            gold = target_ids[0].view(1, -1, 1)
+            gold_logp = logp.gather(2, gold).squeeze(0).squeeze(-1)
+            pred = target_logits.argmax(dim=-1)
+            token_correct = int((pred == target_ids).sum().item())
+            out_rows.append(
+                {
+                    "id": row["id"],
+                    "category": row.get("category"),
+                    "target_tokens": int(answer_len),
+                    "target_token_correct": token_correct,
+                    "target_token_accuracy": token_correct / answer_len if answer_len else None,
+                    "target_sequence_argmax_exact": bool(token_correct == answer_len),
+                    "target_logprob": float(gold_logp.sum().item()),
+                    "mean_target_token_logprob": float(gold_logp.mean().item()) if answer_len else None,
+                }
+            )
+            if i % args.log_every == 0 or i == len(rows):
+                print(f"{output.stem}: teacher-forced {i}/{len(rows)}", flush=True)
+    write_jsonl(output, out_rows)
+    return summarize_teacher_forced(out_rows, pairs_by_id)
 
 
 def evaluate_once(
@@ -640,6 +731,121 @@ def eval_ladder(args: argparse.Namespace) -> None:
         run.finish()
 
 
+def teacher_forced_ladder(args: argparse.Namespace) -> None:
+    rows = read_records(args.pairs)
+    if args.limit:
+        rows = rows[: args.limit]
+    pairs_by_id = {row["id"]: row for row in rows}
+    output_dir = args.output_dir
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    model, tokenizer = load_model_and_tokenizer(args)
+    _n_layers, _n_heads, hidden, _head_dim = qwen_attention_shape(model)
+    head_scores, ov_scores = load_attention_scores(args.attribution) if args.attribution else (None, None)
+    means = load_means(args.mean_cache, (model.config.num_hidden_layers, hidden))
+    topks = parse_int_list(args.topks)
+    if args.include_unmasked:
+        topks = [0] + topks
+
+    run = init_wandb_run(
+        args,
+        default_project="prism-bfcl-attention",
+        default_group=args.run_name,
+        default_job_type="attention-teacher-forced",
+        default_name=args.run_name,
+        default_tags=f"bfcl,qwen3,attention,teacher-forced,{args.unit},{args.ablation}",
+        config={
+            "cmd": "teacher-forced-ladder",
+            "model": args.model,
+            "adapter": args.adapter,
+            "unit": args.unit,
+            "topks": topks,
+            "ablation": args.ablation,
+            "attribution": str(args.attribution) if args.attribution else None,
+            "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+            "random_seed": args.random_seed,
+        },
+    )
+
+    aggregate = {
+        "run_name": args.run_name,
+        "model": args.model,
+        "adapter": args.adapter,
+        "pairs": str(args.pairs),
+        "unit": args.unit,
+        "ablation": args.ablation,
+        "attribution": str(args.attribution) if args.attribution else None,
+        "mean_cache": str(args.mean_cache) if args.mean_cache else None,
+        "random_seed": args.random_seed,
+        "metric": "teacher_forced_gold_tool_call_target",
+        "results": [],
+    }
+    receipt_files: list[Path] = []
+    for topk in topks:
+        hooks = []
+        if topk == 0:
+            name = "unmasked"
+            mask_info = {"unit": "none", "requested_topk": 0, "kept_ov_channels": hidden * model.config.num_hidden_layers}
+        else:
+            if head_scores is None or ov_scores is None:
+                raise ValueError("--attribution is required for masked teacher-forced eval")
+            keep, mask_info = make_keep_mask(
+                head_scores=head_scores,
+                ov_scores=ov_scores,
+                unit=args.unit,
+                topk=topk,
+                random_seed=args.random_seed,
+            )
+            hooks = install_attention_keep_hooks(model, keep, ablation=args.ablation, means=means)
+            random_tag = f"_random{args.random_seed}" if args.random_seed is not None else ""
+            name = f"{args.unit}_{args.ablation}_k{topk}{random_tag}"
+        try:
+            jsonl_path = output_dir / f"{name}.teacher_forced.jsonl"
+            summary = teacher_forced_once(
+                args=args,
+                rows=rows,
+                pairs_by_id=pairs_by_id,
+                model=model,
+                tokenizer=tokenizer,
+                output=jsonl_path,
+            )
+        finally:
+            for hook in hooks:
+                hook.remove()
+        summary.update(
+            {
+                "name": name,
+                "mask": mask_info,
+                "records": str(jsonl_path),
+                "summary": str(jsonl_path.with_suffix(".summary.json")),
+            }
+        )
+        json_dump(jsonl_path.with_suffix(".summary.json"), summary)
+        receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
+        aggregate["results"].append(summary)
+        if run is not None:
+            run.log(
+                {
+                    "tf/topk": topk,
+                    "tf/target_token_accuracy": summary["target_token_accuracy"],
+                    "tf/sequence_argmax_exact_accuracy": summary["sequence_argmax_exact_accuracy"],
+                    "tf/mean_target_logprob": summary["mean_target_logprob"],
+                    "tf/mean_target_token_logprob": summary["mean_target_token_logprob"],
+                    "tf/kept_ov_channels": mask_info.get("kept_ov_channels"),
+                    "tf/kept_heads": mask_info.get("kept_heads"),
+                },
+                step=max(topk, len(aggregate["results"])),
+            )
+        print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
+
+    aggregate_path = output_dir / "teacher_forced_ladder_summary.json"
+    json_dump(aggregate_path, aggregate)
+    print(json.dumps(aggregate, indent=2, ensure_ascii=False))
+    if run is not None:
+        log_wandb_receipts(run, name=f"{args.run_name}-attention-teacher-forced", files=[aggregate_path, *receipt_files])
+        run.finish()
+
+
 def add_common_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--model", default="Qwen/Qwen3-8B")
     parser.add_argument("--tokenizer")
@@ -696,6 +902,23 @@ def main() -> None:
     add_common_model_args(p)
     add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-eval")
     p.set_defaults(func=eval_ladder)
+
+    p = sub.add_parser("teacher-forced-ladder")
+    p.add_argument("--pairs", type=Path, required=True)
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--attribution", type=Path)
+    p.add_argument("--mean-cache", type=Path)
+    p.add_argument("--run-name", default="issue3-attn-teacher-forced")
+    p.add_argument("--unit", choices=["head", "ov"], default="head")
+    p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
+    p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
+    p.add_argument("--random-seed", type=int)
+    p.add_argument("--include-unmasked", action="store_true")
+    p.add_argument("--limit", type=int)
+    p.add_argument("--log-every", type=int, default=25)
+    add_common_model_args(p)
+    add_wandb_args(p, default_project="prism-bfcl-attention", default_job_type="attention-teacher-forced")
+    p.set_defaults(func=teacher_forced_ladder)
 
     args = parser.parse_args()
     args.func(args)
