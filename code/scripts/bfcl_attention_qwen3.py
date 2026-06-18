@@ -975,6 +975,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
             if run is not None:
                 run.log(
                     {
+                        "eval/ladder_index": len(aggregate["results"]),
                         "eval/topk": topk,
                         "eval/exact_correct": summary["exact_correct"],
                         "eval/exact_accuracy": summary["exact_accuracy"],
@@ -988,7 +989,7 @@ def eval_ladder(args: argparse.Namespace) -> None:
                         "eval/layer_floor": mask_info.get("layer_floor"),
                         "eval/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
                     },
-                    step=max(topk, len(aggregate["results"])),
+                    step=len(aggregate["results"]),
                 )
             print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     finally:
@@ -1127,6 +1128,7 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
             if run is not None:
                 run.log(
                     {
+                        "tf/ladder_index": len(aggregate["results"]),
                         "tf/topk": topk,
                         "tf/target_token_accuracy": summary["target_token_accuracy"],
                         "tf/sequence_argmax_exact_accuracy": summary["sequence_argmax_exact_accuracy"],
@@ -1139,7 +1141,7 @@ def teacher_forced_ladder(args: argparse.Namespace) -> None:
                         "tf/layer_floor": mask_info.get("layer_floor"),
                         "tf/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
                     },
-                    step=max(topk, len(aggregate["results"])),
+                    step=len(aggregate["results"]),
                 )
             print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     finally:
