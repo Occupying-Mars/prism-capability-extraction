@@ -617,6 +617,12 @@ def score_exact(args: argparse.Namespace) -> None:
 
 
 def format_tool_call_target(row: dict[str, Any]) -> str:
+    target_text = row.get("target_text")
+    if isinstance(target_text, str) and target_text.strip():
+        return target_text.strip()
+    target_call = row.get("target_call")
+    if isinstance(target_call, dict) and target_call.get("name"):
+        return "<tool_call>\n" + json.dumps(canonical(target_call), ensure_ascii=False) + "\n</tool_call>"
     refs = row.get("reference_calls") or expand_bfcl_ground_truth(row.get("target"))
     if not refs:
         raise ValueError(f"row {row.get('id')} has no reference call")
