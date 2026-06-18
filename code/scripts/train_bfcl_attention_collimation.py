@@ -69,6 +69,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--max-grad-norm", type=float, default=1.0)
     p.add_argument("--policy-kl-beta", type=float, default=1.0)
     p.add_argument("--ce-beta", type=float, default=0.1)
+    p.add_argument(
+        "--full-attn-kl-beta",
+        type=float,
+        default=0.0,
+        help="Optional KL that keeps the trainable adapter close to the teacher under full attention.",
+    )
     p.add_argument("--kl-temperature", type=float, default=1.0)
     p.add_argument(
         "--teacher-mode",
@@ -448,7 +454,11 @@ def main() -> None:
             "n_rows": len(dataset),
             "mlp_mask": mlp_info,
             "attention_mask": attention_info,
-            "loss": {"policy_kl_beta": args.policy_kl_beta, "ce_beta": args.ce_beta},
+            "loss": {
+                "policy_kl_beta": args.policy_kl_beta,
+                "ce_beta": args.ce_beta,
+                "full_attn_kl_beta": args.full_attn_kl_beta,
+            },
             "teacher": {
                 "mode": args.teacher_mode,
                 "model": args.teacher_model or args.model,
@@ -488,11 +498,27 @@ def main() -> None:
                 teacher_logits = teacher_logits.to(student_logits.device)
             policy_kl = kl_loss(student_logits, teacher_logits, batch["kl_logit_mask"], temperature=args.kl_temperature)
             ce = answer_ce_loss(student_logits, batch["labels"])
-            loss = args.policy_kl_beta * policy_kl + args.ce_beta * ce
+            full_attn_kl = student_logits.new_zeros(())
+            if args.full_attn_kl_beta:
+                full_student_logits = masked_student_forward(
+                    model,
+                    batch,
+                    attention_keep=None,
+                    mlp_keep=mlp_keep,
+                    args=args,
+                )
+                full_attn_kl = kl_loss(
+                    full_student_logits,
+                    teacher_logits,
+                    batch["kl_logit_mask"],
+                    temperature=args.kl_temperature,
+                )
+            loss = args.policy_kl_beta * policy_kl + args.ce_beta * ce + args.full_attn_kl_beta * full_attn_kl
             (loss / args.grad_accum).backward()
 
             running["loss"] += float(loss.detach().cpu())
             running["policy_kl"] += float(policy_kl.detach().cpu())
+            running["full_attn_kl"] += float(full_attn_kl.detach().cpu())
             running["ce"] += float(ce.detach().cpu())
             running["n"] += 1
             seen_batches += 1
@@ -511,6 +537,7 @@ def main() -> None:
                     "step": global_step,
                     "loss": running["loss"] / denom,
                     "policy_kl": running["policy_kl"] / denom,
+                    "full_attn_kl": running["full_attn_kl"] / denom,
                     "ce": running["ce"] / denom,
                     "lr": scheduler.get_last_lr()[0],
                     "elapsed_s": time.time() - start,
