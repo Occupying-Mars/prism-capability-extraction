@@ -267,6 +267,16 @@ def score_unit_arrays(unit_stats: dict[str, np.ndarray]) -> tuple[dict[str, np.n
     return local_scores, global_scores, thresholds
 
 
+def sanitize_key(value: Any) -> str:
+    return "".join(ch if ch.isalnum() else "_" for ch in str(value)).strip("_") or "unknown"
+
+
+def rewrite_checksums(atlas_dir: Path) -> None:
+    files = sorted(path for path in atlas_dir.iterdir() if path.is_file() and path.name != "checksums.sha256")
+    lines = [f"{sha256_file(path)}  {path.name}" for path in files]
+    (atlas_dir / "checksums.sha256").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
 def collect(args: argparse.Namespace) -> None:
     rank, world, local_rank = distributed_context()
     if torch.cuda.is_available():
@@ -897,6 +907,81 @@ def validate(args: argparse.Namespace) -> None:
         raise SystemExit(1)
 
 
+def add_category_rollups(args: argparse.Namespace) -> None:
+    manifest_path = args.atlas_dir / "attention_atlas_manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    query_rows = read_jsonl(args.atlas_dir / "query_manifest.jsonl")
+    categories = sorted({row.get("category", "unknown") for row in query_rows})
+    category_indices = {
+        category: np.array([idx for idx, row in enumerate(query_rows) if row.get("category", "unknown") == category], dtype=np.int64)
+        for category in categories
+    }
+
+    channel_payload: dict[str, np.ndarray] = {
+        "categories": np.array([str(category) for category in categories]),
+        "segments": np.array(SEGMENTS),
+        "stats": np.array(STATS),
+    }
+    for site in CHANNEL_SITES:
+        stats = np.load(args.atlas_dir / f"{site}_channel_stats_float16.npy", mmap_mode="r")
+        global_scores = np.load(args.atlas_dir / f"{site}_channel_scores_global_uint8.npy", mmap_mode="r")
+        for category, indices in category_indices.items():
+            key = sanitize_key(category)
+            channel_payload[f"category_{key}_{site}_stats_mean_float16"] = np.asarray(stats[indices]).mean(axis=0).astype(np.float16)
+            channel_payload[f"category_{key}_{site}_global_score_mean_float16"] = (
+                np.asarray(global_scores[indices]).mean(axis=0).astype(np.float16)
+            )
+
+    unit_stats_file = np.load(args.atlas_dir / "attention_unit_stats_float16.npz")
+    unit_scores_file = np.load(args.atlas_dir / "attention_unit_scores_global_uint8.npz")
+    unit_payload: dict[str, np.ndarray] = {
+        "categories": np.array([str(category) for category in categories]),
+        "segments": np.array(SEGMENTS),
+        "stats": np.array(STATS),
+    }
+    for site in UNIT_SITES:
+        stats = unit_stats_file[site]
+        global_scores = unit_scores_file[site]
+        for category, indices in category_indices.items():
+            key = sanitize_key(category)
+            unit_payload[f"category_{key}_{site}_stats_mean_float16"] = stats[indices].mean(axis=0).astype(np.float16)
+            unit_payload[f"category_{key}_{site}_global_score_mean_float16"] = global_scores[indices].mean(axis=0).astype(np.float16)
+
+    channel_path = args.atlas_dir / "category_attention_channel_heatmaps.npz"
+    unit_path = args.atlas_dir / "category_attention_unit_heatmaps.npz"
+    np.savez(channel_path, **channel_payload)
+    np.savez(unit_path, **unit_payload)
+
+    manifest["category_rollups"] = {
+        "categories": [str(category) for category in categories],
+        "files": {
+            "category_attention_channel_heatmaps.npz": str(channel_path),
+            "category_attention_unit_heatmaps.npz": str(unit_path),
+        },
+        "contents": [
+            "per-category mean raw activation stats for q/k/v/ov channel heatmaps",
+            "per-category mean global decile score heatmaps for q/k/v/ov channels",
+            "per-category mean raw activation stats for q_head/k_head/v_head/ov_head/qk_group/qkv_group",
+            "per-category mean global decile score heatmaps for attention unit sites",
+        ],
+        "array_order": ["segment", "stat", "layer", "channel_or_head_or_group"],
+    }
+    manifest.setdefault("files", {})
+    manifest["files"][channel_path.name] = str(channel_path)
+    manifest["files"][unit_path.name] = str(unit_path)
+    json_dump(manifest_path, manifest)
+    rewrite_checksums(args.atlas_dir)
+    summary = {
+        "ok": True,
+        "categories": [str(category) for category in categories],
+        "channel_file": str(channel_path),
+        "unit_file": str(unit_path),
+        "channel_keys": len(channel_payload),
+        "unit_keys": len(unit_payload),
+    }
+    print(json.dumps(summary, indent=2, sort_keys=True))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -938,6 +1023,10 @@ def build_parser() -> argparse.ArgumentParser:
     validate_p.add_argument("--atlas-dir", type=Path, required=True)
     validate_p.add_argument("--expected-queries", type=int)
     validate_p.set_defaults(func=validate)
+
+    rollup_p = sub.add_parser("add-category-rollups")
+    rollup_p.add_argument("--atlas-dir", type=Path, required=True)
+    rollup_p.set_defaults(func=add_category_rollups)
     return parser
 
 
