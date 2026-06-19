@@ -57,7 +57,9 @@ def main():
         for r in rows
     ]
 
-    llm_kwargs = dict(model=args.model, dtype="bfloat16",
+    # enforce_eager avoids inductor/torch.compile CUDA JIT (no nvcc on this image);
+    # flashinfer sampler/attention are disabled via env (greedy needs neither).
+    llm_kwargs = dict(model=args.model, dtype="bfloat16", enforce_eager=True,
                       gpu_memory_utilization=args.gpu_mem, max_model_len=args.max_model_len)
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
