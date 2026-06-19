@@ -815,7 +815,7 @@ def install_attention_keep_hooks(
     return hooks
 
 
-def install_qk_keep_hooks(model, keep: torch.Tensor):
+def install_qk_keep_hooks(model, keep: torch.Tensor, *, include_v: bool = False):
     q_keep, k_keep, _info = qk_keep_masks(model, keep)
     hooks = []
     layers = decoder_layers(model)
@@ -836,6 +836,8 @@ def install_qk_keep_hooks(model, keep: torch.Tensor):
 
         hooks.append(layer.self_attn.q_proj.register_forward_hook(q_hook))
         hooks.append(layer.self_attn.k_proj.register_forward_hook(k_hook))
+        if include_v:
+            hooks.append(layer.self_attn.v_proj.register_forward_hook(k_hook))
     return hooks
 
 
@@ -847,14 +849,14 @@ def install_attention_projection_hooks(
     ablation: str,
     means: torch.Tensor | None,
 ):
-    if projection_sites not in {"ov", "qk", "qk-ov"}:
+    if projection_sites not in {"ov", "qk", "qk-ov", "qkv", "qkv-ov"}:
         raise ValueError(f"unknown projection_sites: {projection_sites}")
-    if projection_sites in {"qk", "qk-ov"} and ablation != "zero":
-        raise ValueError("qk projection masking currently supports zero ablation only")
+    if projection_sites in {"qk", "qk-ov", "qkv", "qkv-ov"} and ablation != "zero":
+        raise ValueError("qk/qkv projection masking currently supports zero ablation only")
     hooks = []
-    if projection_sites in {"qk", "qk-ov"}:
-        hooks.extend(install_qk_keep_hooks(model, keep))
-    if projection_sites in {"ov", "qk-ov"}:
+    if projection_sites in {"qk", "qk-ov", "qkv", "qkv-ov"}:
+        hooks.extend(install_qk_keep_hooks(model, keep, include_v=projection_sites in {"qkv", "qkv-ov"}))
+    if projection_sites in {"ov", "qk-ov", "qkv-ov"}:
         hooks.extend(install_attention_keep_hooks(model, keep, ablation=ablation, means=means))
     return hooks
 
@@ -1128,10 +1130,10 @@ def eval_ladder(args: argparse.Namespace) -> None:
     }
     receipt_files: list[Path] = []
     mlp_hooks = install_mlp_keep_hooks(model, mlp_keep)
-    if args.projection_sites in {"qk", "qk-ov"} and args.unit != "head":
-        raise ValueError("--projection-sites qk/qk-ov requires --unit head")
-    if args.projection_sites in {"qk", "qk-ov"} and args.ablation != "zero":
-        raise ValueError("--projection-sites qk/qk-ov supports only --ablation zero")
+    if args.projection_sites in {"qk", "qk-ov", "qkv", "qkv-ov"} and args.unit != "head":
+        raise ValueError("--projection-sites qk/qk-ov/qkv/qkv-ov requires --unit head")
+    if args.projection_sites in {"qk", "qk-ov", "qkv", "qkv-ov"} and args.ablation != "zero":
+        raise ValueError("--projection-sites qk/qk-ov/qkv/qkv-ov supports only --ablation zero")
     try:
         for topk in topks:
             hooks = []
@@ -1164,10 +1166,12 @@ def eval_ladder(args: argparse.Namespace) -> None:
                 )
                 mask_info["mlp"] = mlp_info
                 mask_info["projection_sites"] = args.projection_sites
-                if args.projection_sites in {"qk", "qk-ov"}:
+                if args.projection_sites in {"qk", "qk-ov", "qkv", "qkv-ov"}:
                     mask_info.update(qk_keep_masks(model, keep)[2])
                     if args.projection_sites == "qk":
                         mask_info["qk_only_note"] = "qk-only masks attention scores but does not remove dropped-head OV output"
+                    if args.projection_sites == "qkv":
+                        mask_info["qkv_only_note"] = "qkv-only masks attention scores and values but does not remove dropped-head OV output"
                 name = mask_output_name(args, topk, mask_info, mlp_info)
             jsonl_path = output_dir / f"{name}.jsonl"
             summary = load_resume_summary(args.resume, jsonl_path)
@@ -1576,7 +1580,7 @@ def main() -> None:
     p.add_argument("--run-name", default="issue3-attn-eval")
     p.add_argument("--unit", choices=["head", "ov"], default="head")
     p.add_argument("--mask-strategy", choices=["global", "layer-balanced", "head-scaffold-ov", "kv-group"], default="global")
-    p.add_argument("--projection-sites", choices=["ov", "qk", "qk-ov"], default="ov")
+    p.add_argument("--projection-sites", choices=["ov", "qk", "qk-ov", "qkv", "qkv-ov"], default="ov")
     p.add_argument("--topks", default="8,16,32,64,128,256,512,1024")
     p.add_argument("--ablation", choices=["zero", "mean"], default="zero")
     p.add_argument("--layer-floor", type=int, default=0)

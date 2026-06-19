@@ -9,7 +9,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.bfcl_attention_qwen3 import make_boundary_swap_keep_mask, make_keep_mask, qk_keep_masks_from_attention_keep
+from scripts.bfcl_attention_qwen3 import (
+    install_attention_projection_hooks,
+    make_boundary_swap_keep_mask,
+    make_keep_mask,
+    qk_keep_masks_from_attention_keep,
+)
 
 
 def test_global_ov_mask_picks_highest_channels() -> None:
@@ -158,3 +163,41 @@ def test_kv_group_head_mask_keeps_whole_query_groups() -> None:
     assert info["kept_kv_groups"] == 1
     assert info["kept_heads"] == 2
     assert info["kept_ov_channels"] == 4
+
+
+def test_qkv_ov_projection_hooks_zero_qkv_and_ov_sites() -> None:
+    class Attention:
+        def __init__(self) -> None:
+            self.q_proj = torch.nn.Identity()
+            self.k_proj = torch.nn.Identity()
+            self.v_proj = torch.nn.Identity()
+            self.o_proj = torch.nn.Identity()
+
+    class Layer:
+        def __init__(self) -> None:
+            self.self_attn = Attention()
+
+    class Config:
+        num_hidden_layers = 1
+        num_attention_heads = 4
+        num_key_value_heads = 2
+        hidden_size = 8
+        head_dim = 2
+
+    class Model:
+        def __init__(self) -> None:
+            self.config = Config()
+            self.layers = [Layer()]
+
+    model = Model()
+    keep = torch.tensor([[True, True, False, False, False, False, False, False]])
+    hooks = install_attention_projection_hooks(model, keep, projection_sites="qkv-ov", ablation="zero", means=None)
+    try:
+        attn = model.layers[0].self_attn
+        assert attn.q_proj(torch.ones(1, 1, 8)).tolist() == [[[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]]
+        assert attn.k_proj(torch.ones(1, 1, 4)).tolist() == [[[1.0, 1.0, 0.0, 0.0]]]
+        assert attn.v_proj(torch.ones(1, 1, 4)).tolist() == [[[1.0, 1.0, 0.0, 0.0]]]
+        assert attn.o_proj(torch.ones(1, 1, 8)).tolist() == [[[1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]]
+    finally:
+        for hook in hooks:
+            hook.remove()
