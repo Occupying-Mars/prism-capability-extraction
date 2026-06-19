@@ -1017,9 +1017,12 @@ def evaluate_once(
     model,
     tokenizer,
     output: Path,
+    wandb_run=None,
+    progress_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     device = input_device(model)
     out_rows = []
+    last_progress_log = 0
     with torch.inference_mode():
         for start in range(0, len(rows), args.batch_size):
             batch_rows = rows[start : start + args.batch_size]
@@ -1061,6 +1064,25 @@ def evaluate_once(
                     }
                 )
             print(f"{output.stem}: evaluated {len(out_rows)}/{len(rows)}", flush=True)
+            if wandb_run is not None:
+                done = len(out_rows)
+                log_every = int(getattr(args, "log_every", 0) or 0)
+                if log_every and (done - last_progress_log >= log_every or done == len(rows)):
+                    raw_correct = sum(1 for row in out_rows if row["raw_correct"])
+                    normalized_correct = sum(1 for row in out_rows if row["normalized_correct"])
+                    payload = {
+                        "progress/examples": done,
+                        "progress/total_examples": len(rows),
+                        "progress/fraction": done / len(rows) if rows else None,
+                        "progress/raw_exact_correct_so_far": raw_correct,
+                        "progress/raw_exact_accuracy_so_far": raw_correct / done if done else None,
+                        "progress/normalized_exact_correct_so_far": normalized_correct,
+                        "progress/normalized_exact_accuracy_so_far": normalized_correct / done if done else None,
+                    }
+                    if progress_context:
+                        payload.update(progress_context)
+                    wandb_run.log(payload)
+                    last_progress_log = done
     write_jsonl(output, out_rows)
     return summarize_eval_rows(out_rows, pairs_by_id, args.normalized)
 
@@ -1192,6 +1214,15 @@ def eval_ladder(args: argparse.Namespace) -> None:
                         model=model,
                         tokenizer=tokenizer,
                         output=jsonl_path,
+                        wandb_run=run,
+                        progress_context={
+                            "progress/cmd": "eval-ladder",
+                            "progress/topk": topk,
+                            "progress/ladder_index": len(aggregate["results"]) + 1,
+                            "progress/projection_sites": args.projection_sites,
+                            "progress/mask_strategy": args.mask_strategy,
+                            "progress/ablation": args.ablation,
+                        },
                     )
                 finally:
                     for hook in hooks:
@@ -1208,26 +1239,28 @@ def eval_ladder(args: argparse.Namespace) -> None:
             receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
             aggregate["results"].append(summary)
             if run is not None:
-                run.log(
-                    {
-                        "eval/ladder_index": len(aggregate["results"]),
-                        "eval/topk": topk,
-                        "eval/exact_correct": summary["exact_correct"],
-                        "eval/exact_accuracy": summary["exact_accuracy"],
-                        "eval/raw_exact_correct": summary["raw_exact_correct"],
-                        "eval/normalized_exact_correct": summary["normalized_exact_correct"],
-                        "eval/recovery_vs_full_anchor": summary["recovery_vs_full_anchor"],
-                        "eval/kept_ov_channels": mask_info.get("kept_ov_channels"),
-                        "eval/kept_heads": mask_info.get("kept_heads"),
-                        "eval/kept_heads_touched": mask_info.get("kept_heads_touched"),
-                        "eval/q_heads_kept": mask_info.get("q_heads_kept"),
-                        "eval/kv_heads_kept": mask_info.get("kv_heads_kept"),
-                        "eval/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
-                        "eval/layer_floor": mask_info.get("layer_floor"),
-                        "eval/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
-                    },
-                    step=len(aggregate["results"]),
-                )
+                eval_metrics = {
+                    "eval/ladder_index": len(aggregate["results"]),
+                    "eval/topk": topk,
+                    "eval/exact_correct": summary["exact_correct"],
+                    "eval/exact_accuracy": summary["exact_accuracy"],
+                    "eval/raw_exact_correct": summary["raw_exact_correct"],
+                    "eval/normalized_exact_correct": summary["normalized_exact_correct"],
+                    "eval/recovery_vs_full_anchor": summary["recovery_vs_full_anchor"],
+                    "eval/kept_ov_channels": mask_info.get("kept_ov_channels"),
+                    "eval/kept_heads": mask_info.get("kept_heads"),
+                    "eval/kept_heads_touched": mask_info.get("kept_heads_touched"),
+                    "eval/q_heads_kept": mask_info.get("q_heads_kept"),
+                    "eval/kv_heads_kept": mask_info.get("kv_heads_kept"),
+                    "eval/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                    "eval/layer_floor": mask_info.get("layer_floor"),
+                    "eval/head_scaffold_kept_heads": mask_info.get("head_scaffold_kept_heads"),
+                    f"eval/topk_{topk}/raw_exact_correct": summary["raw_exact_correct"],
+                    f"eval/topk_{topk}/normalized_exact_correct": summary["normalized_exact_correct"],
+                    f"eval/topk_{topk}/recovery_vs_full_anchor": summary["recovery_vs_full_anchor"],
+                }
+                run.log(eval_metrics, commit=True)
+                run.summary.update(eval_metrics)
             print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     finally:
         for hook in mlp_hooks:
@@ -1332,6 +1365,14 @@ def eval_boundary_swap(args: argparse.Namespace) -> None:
                             model=model,
                             tokenizer=tokenizer,
                             output=jsonl_path,
+                            wandb_run=run,
+                            progress_context={
+                                "progress/cmd": "eval-boundary-swap",
+                                "progress/topk": args.topk,
+                                "progress/remove_batch": remove_batch,
+                                "progress/add_batch": add_batch,
+                                "progress/ablation": args.ablation,
+                            },
                         )
                     finally:
                         for hook in hooks:
@@ -1348,21 +1389,24 @@ def eval_boundary_swap(args: argparse.Namespace) -> None:
                 receipt_files.extend([jsonl_path, jsonl_path.with_suffix(".summary.json")])
                 aggregate["results"].append(summary)
                 if run is not None:
-                    run.log(
-                        {
-                            "swap/ladder_index": len(aggregate["results"]),
-                            "swap/topk": args.topk,
-                            "swap/remove_batch": remove_batch,
-                            "swap/add_batch": add_batch,
-                            "swap/swap_batch_size": args.swap_batch_size,
-                            "swap/exact_correct": summary["exact_correct"],
-                            "swap/raw_exact_correct": summary["raw_exact_correct"],
-                            "swap/normalized_exact_correct": summary["normalized_exact_correct"],
-                            "swap/kept_ov_channels": mask_info.get("kept_ov_channels"),
-                            "swap/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
-                        },
-                        step=len(aggregate["results"]),
-                    )
+                    swap_metrics = {
+                        "swap/ladder_index": len(aggregate["results"]),
+                        "swap/topk": args.topk,
+                        "swap/remove_batch": remove_batch,
+                        "swap/add_batch": add_batch,
+                        "swap/swap_batch_size": args.swap_batch_size,
+                        "swap/exact_correct": summary["exact_correct"],
+                        "swap/raw_exact_correct": summary["raw_exact_correct"],
+                        "swap/normalized_exact_correct": summary["normalized_exact_correct"],
+                        "swap/kept_ov_channels": mask_info.get("kept_ov_channels"),
+                        "swap/mlp_kept": mlp_info.get("mlp_kept") if mlp_info else None,
+                        f"swap/rm{remove_batch}_add{add_batch}/raw_exact_correct": summary["raw_exact_correct"],
+                        f"swap/rm{remove_batch}_add{add_batch}/normalized_exact_correct": summary[
+                            "normalized_exact_correct"
+                        ],
+                    }
+                    run.log(swap_metrics, commit=True)
+                    run.summary.update(swap_metrics)
                 print(json.dumps(summary, indent=2, ensure_ascii=False), flush=True)
     finally:
         for hook in mlp_hooks:
@@ -1592,6 +1636,7 @@ def main() -> None:
     p.add_argument("--limit", type=int)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--max-new-tokens", type=int, default=512)
+    p.add_argument("--log-every", type=int, default=25)
     p.add_argument("--bfcl-canonicalization-prompt", action="store_true")
     p.add_argument("--normalized", action="store_true")
     p.add_argument("--resume", action="store_true")
@@ -1616,6 +1661,7 @@ def main() -> None:
     p.add_argument("--limit", type=int)
     p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--max-new-tokens", type=int, default=512)
+    p.add_argument("--log-every", type=int, default=25)
     p.add_argument("--bfcl-canonicalization-prompt", action="store_true")
     p.add_argument("--normalized", action="store_true")
     p.add_argument("--resume", action="store_true")
