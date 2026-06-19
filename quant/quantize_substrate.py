@@ -73,7 +73,7 @@ def _fqn_in_target(fqn: str, target: str) -> bool:
     return any(tok in fqn for tok in TARGET_MODULES[target])
 
 
-def build_quantized_base(method: str, model_name: str, dtype_str: str, target: str):
+def build_quantized_base(method: str, model_name: str, dtype_str: str, target: str, gptq_path=None):
     import torch
     from transformers import AutoModelForCausalLM
 
@@ -82,6 +82,14 @@ def build_quantized_base(method: str, model_name: str, dtype_str: str, target: s
     # bitsandbytes can only *exclude* modules from quant -> skip the complement.
     skip = [] if target == "both" else (["mlp"] if target == "attn" else ["self_attn"])
 
+    if method == "gptq":
+        # full-model 4-bit GPTQ checkpoint from gptq_quantize.py (calibrated,
+        # leak-gated). transformers loads it via the gptqmodel backend.
+        if not gptq_path:
+            raise ValueError("--method gptq requires --gptq-path")
+        return AutoModelForCausalLM.from_pretrained(
+            str(gptq_path), torch_dtype=dtype, device_map="auto", **common
+        )
     if method in ("nf4", "int8"):
         from transformers import BitsAndBytesConfig
 
@@ -127,7 +135,7 @@ def load_substrate(args):
 
     print(f"[load] base={args.model} method={args.method} target={args.target} dtype={args.dtype}", flush=True)
     t0 = time.time()
-    model = build_quantized_base(args.method, args.model, args.dtype, args.target)
+    model = build_quantized_base(args.method, args.model, args.dtype, args.target, getattr(args, "gptq_path", None))
 
     if args.adapter:
         from peft import PeftModel
@@ -259,9 +267,10 @@ def init_wandb(args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--method", default="nf4", choices=["nf4", "int8", "int4wo", "int8wo", "none"])
+    ap.add_argument("--method", default="nf4", choices=["nf4", "int8", "int4wo", "int8wo", "gptq", "none"])
     ap.add_argument("--target", default="attn", choices=["attn", "mlp", "both"],
-                    help="which projections to quantize (attention-first; MLP later)")
+                    help="which projections to quantize (attention-first; MLP later). N/A for gptq (full-model)")
+    ap.add_argument("--gptq-path", type=Path, help="path to a GPTQ checkpoint (--method gptq)")
     ap.add_argument("--model", default="Qwen/Qwen3-8B")
     ap.add_argument("--adapter", type=Path, default=DEF_ADAPTER)
     ap.add_argument("--mask", type=Path, default=DEF_MASK)

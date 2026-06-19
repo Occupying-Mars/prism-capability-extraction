@@ -20,6 +20,10 @@ uv pip install \
   safetensors numpy "huggingface_hub>=0.34" datasets \
   bitsandbytes torchao wandb
 
+# GPTQ (eval-aware calibrated PTQ). May lack prebuilt kernels on brand-new
+# Blackwell (sm_120) — falls back to the torch backend for inference if so.
+uv pip install gptqmodel || echo "[setup_pod] gptqmodel install failed (Blackwell kernels?) — NF4+LoRA recovery path still works"
+
 python - <<'PY'
 import torch
 print("torch", torch.__version__, "| cuda", torch.cuda.is_available(),
