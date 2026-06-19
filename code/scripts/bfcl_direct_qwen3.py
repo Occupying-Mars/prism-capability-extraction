@@ -400,8 +400,12 @@ def canonical(value: Any) -> Any:
     if isinstance(value, list):
         return [canonical(v) for v in value]
     if isinstance(value, set):
-        return sorted(canonical(v) for v in value)
+        return sorted((canonical(v) for v in value), key=canonical_sort_key)
     return value
+
+
+def canonical_sort_key(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
 
 
 def maybe_number(value: str, target: Any) -> Any:
