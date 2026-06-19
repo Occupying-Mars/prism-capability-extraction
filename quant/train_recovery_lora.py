@@ -67,10 +67,11 @@ def encode_row(row, tokenizer, max_seq_len):
     target_text = (row.get("target_text") or "").strip()
     if not target_text:
         return None
-    prompt_ids = tokenizer.apply_chat_template(
+    enc = tokenizer.apply_chat_template(
         row["messages"], tools=row.get("tools") or None,
-        add_generation_prompt=True, tokenize=True, enable_thinking=False,
+        add_generation_prompt=True, tokenize=True, return_dict=True, enable_thinking=False,
     )
+    prompt_ids = list(enc["input_ids"])
     target_ids = tokenizer(target_text, add_special_tokens=False)["input_ids"]
     if tokenizer.eos_token_id is not None:
         target_ids = target_ids + [int(tokenizer.eos_token_id)]
