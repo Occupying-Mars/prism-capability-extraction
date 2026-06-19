@@ -59,29 +59,42 @@ DEF_PAIRS = ART / "issue12_recursive_coactivation_mace_v1/data/bfcl_single_call/
 DEF_TOPK = 140875  # v13 MACE-90 kept-channel budget
 
 
-def build_quantized_base(method: str, model_name: str, dtype_str: str):
+# Which decoder submodules each --target touches. We stage quant attention-first
+# (issue #4): quantize self_attn projections, leave the MLP substrate in bf16,
+# then quantize MLP as a later stage.
+TARGET_MODULES = {
+    "attn": ["self_attn"],
+    "mlp": ["mlp"],
+    "both": ["self_attn", "mlp"],
+}
+
+
+def _fqn_in_target(fqn: str, target: str) -> bool:
+    return any(tok in fqn for tok in TARGET_MODULES[target])
+
+
+def build_quantized_base(method: str, model_name: str, dtype_str: str, target: str):
     import torch
     from transformers import AutoModelForCausalLM
 
     dtype = getattr(torch, dtype_str)
     common = dict(attn_implementation="eager")
+    # bitsandbytes can only *exclude* modules from quant -> skip the complement.
+    skip = [] if target == "both" else (["mlp"] if target == "attn" else ["self_attn"])
 
-    if method == "nf4":
+    if method in ("nf4", "int8"):
         from transformers import BitsAndBytesConfig
 
-        qcfg = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=dtype,
-        )
-        return AutoModelForCausalLM.from_pretrained(
-            model_name, quantization_config=qcfg, device_map="auto", **common
-        )
-    if method == "int8":
-        from transformers import BitsAndBytesConfig
-
-        qcfg = BitsAndBytesConfig(load_in_8bit=True)
+        if method == "nf4":
+            qcfg = BitsAndBytesConfig(
+                load_in_4bit=True,
+                bnb_4bit_quant_type="nf4",
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_compute_dtype=dtype,
+                llm_int8_skip_modules=skip or None,
+            )
+        else:
+            qcfg = BitsAndBytesConfig(load_in_8bit=True, llm_int8_skip_modules=skip or None)
         return AutoModelForCausalLM.from_pretrained(
             model_name, quantization_config=qcfg, device_map="auto", **common
         )
@@ -97,12 +110,12 @@ def build_quantized_base(method: str, model_name: str, dtype_str: str):
             )
 
             cfg = Int4WeightOnlyConfig() if method == "int4wo" else Int8WeightOnlyConfig()
-            # Quantize MLP + attention projections only; leave embeddings / lm_head.
+            # Quantize only the target projections; leave embeddings / lm_head / complement.
             quantize_(
                 model,
                 cfg,
                 filter_fn=lambda m, fqn: m.__class__.__name__ == "Linear"
-                and ("mlp" in fqn or "self_attn" in fqn),
+                and _fqn_in_target(fqn, target),
             )
         return model
     raise ValueError(f"unknown method: {method}")
@@ -112,9 +125,9 @@ def load_substrate(args):
     import torch
     from transformers import AutoTokenizer
 
-    print(f"[load] base={args.model} method={args.method} dtype={args.dtype}", flush=True)
+    print(f"[load] base={args.model} method={args.method} target={args.target} dtype={args.dtype}", flush=True)
     t0 = time.time()
-    model = build_quantized_base(args.method, args.model, args.dtype)
+    model = build_quantized_base(args.method, args.model, args.dtype, args.target)
 
     if args.adapter:
         from peft import PeftModel
@@ -192,6 +205,7 @@ def evaluate(model, tokenizer, args) -> dict:
     return {
         "method": args.method,
         "examples": judged,
+        "target": args.target,
         "normalized_exact_correct": norm,
         "normalized_exact_accuracy": norm / judged if judged else None,
         "raw_exact_correct": raw,
@@ -217,10 +231,11 @@ def init_wandb(args):
         run = wandb.init(
             project=os.environ.get("WANDB_PROJECT", "prism-bfcl"),
             group=os.environ.get("WANDB_GROUP", "qwen-substrate-quant"),
-            name=f"quant-{args.method}" + (f"-limit{args.limit}" if args.limit else "-full"),
+            name=f"quant-{args.target}-{args.method}" + (f"-limit{args.limit}" if args.limit else "-full"),
             job_type="quantize-eval",
             config={
                 "method": args.method,
+                "target": args.target,
                 "model": args.model,
                 "adapter": str(args.adapter) if args.adapter else None,
                 "mask": str(args.mask) if args.topk else None,
@@ -242,6 +257,8 @@ def init_wandb(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--method", default="nf4", choices=["nf4", "int8", "int4wo", "int8wo", "none"])
+    ap.add_argument("--target", default="attn", choices=["attn", "mlp", "both"],
+                    help="which projections to quantize (attention-first; MLP later)")
     ap.add_argument("--model", default="Qwen/Qwen3-8B")
     ap.add_argument("--adapter", type=Path, default=DEF_ADAPTER)
     ap.add_argument("--mask", type=Path, default=DEF_MASK)

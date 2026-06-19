@@ -36,6 +36,17 @@ imports those helpers and only adds a weight-quant stage.
 `substrate_meta/` holds the small JSON receipts (b007 summary, adapter config,
 v13 frontier / threshold_hits / manifest) committed to git.
 
+## Staging: attention first, MLP later
+
+The b007 substrate already keeps only ~32% of MLP channels, so the MLP block is
+sparse while **attention is dense** — the bigger remaining bit-volume. We
+quantize in stages via `--target`:
+
+1. `--target attn` — quantize `self_attn.{q,k,v,o}_proj`, leave the masked MLP
+   substrate in bf16. **Current focus.**
+2. `--target mlp` — quantize the kept MLP projections. Later stage.
+3. `--target both` — full quant once each stage holds its score.
+
 ## Quant backends (issue #4 shortlist)
 
 | `--method` | backend | notes |
@@ -45,6 +56,9 @@ v13 frontier / threshold_hits / manifest) committed to git.
 | `int4wo` | torchao | Int4 weight-only, Marlin-friendly |
 | `int8wo` | torchao | Int8 weight-only |
 | `none` | — | bf16 baseline (sanity / anchor) |
+
+`--target` selects modules per backend: bitsandbytes excludes the complement via
+`llm_int8_skip_modules`; torchao filters by FQN.
 
 ## Run (on the pod)
 
@@ -56,10 +70,14 @@ bash setup_pod.sh
 set -a; . ./.env; set +a; export HF_TOKEN="$hf_token"
 .venv/bin/python download_artifacts.py --mode full --dest ./artifacts
 
-# 3. quantize + eval the substrate (wandb on by default, keys from .env)
-.venv/bin/python quantize_substrate.py --method nf4   --limit 64 --eval   # quick
-.venv/bin/python quantize_substrate.py --method none  --eval              # bf16 anchor (full)
-.venv/bin/python quantize_substrate.py --method int4wo --eval             # torchao int4
+# 3. quantize + eval (wandb on by default, keys from .env)
+# bf16 anchor first (must reproduce ~600/664):
+.venv/bin/python quantize_substrate.py --method none --eval
+# attention-first quant:
+.venv/bin/python quantize_substrate.py --target attn --method nf4   --eval
+.venv/bin/python quantize_substrate.py --target attn --method int4wo --eval
+# MLP later:
+.venv/bin/python quantize_substrate.py --target mlp  --method nf4   --eval
 ```
 
 Runs log to wandb (`prism-bfcl` / group `qwen-substrate-quant`); pass
