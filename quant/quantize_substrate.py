@@ -229,6 +229,9 @@ def init_wandb(args):
         if key:
             wandb.login(key=key)
         run = wandb.init(
+            # the API key's default entity is a team without write access;
+            # log to the personal entity explicitly.
+            entity=os.environ.get("WANDB_ENTITY") or "krishnapg2315",
             project=os.environ.get("WANDB_PROJECT", "prism-bfcl"),
             group=os.environ.get("WANDB_GROUP", "qwen-substrate-quant"),
             name=f"quant-{args.target}-{args.method}" + (f"-limit{args.limit}" if args.limit else "-full"),
