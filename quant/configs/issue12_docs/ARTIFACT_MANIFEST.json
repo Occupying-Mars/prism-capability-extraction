@@ -1,0 +1,165 @@
+{
+  "artifact_name": "prism_capability_extraction_public_release",
+  "paper_title": "Prism: Unlocking Language Model Capability Extraction",
+  "paper_authors": [
+    "Abhishek Mishra",
+    "Krishna Pagare"
+  ],
+  "release_type": "flattened_single_commit_code_and_artifact_index",
+  "status": "complete",
+  "release_scope": {
+    "public_repository": "e-xperiments/prism-capability-extraction",
+    "description": "single public code snapshot for the released paper experiments",
+    "included_experiment_families": [
+      "arithmetic capability extraction",
+      "EN-PT translation rescue",
+      "BFCL/function-calling substrate conditioning"
+    ],
+    "large_artifact_policy": "Large generated datasets, raw attribution arrays, model adapters, and full model artifacts are hosted on Hugging Face and referenced by immutable revision SHA."
+  },
+  "huggingface_artifacts": [
+    {
+      "name": "Arithmetic generated data, masks, and run receipts",
+      "type": "dataset",
+      "repo": "TokenBender/circuit-discovery",
+      "url": "https://huggingface.co/datasets/TokenBender/circuit-discovery",
+      "sha": "4b9fb53fef92550042d8576fe011e99270fdca8b"
+    },
+    {
+      "name": "Arithmetic checkpoints and adapters",
+      "type": "model",
+      "repo": "TokenBender/circuit-discovery",
+      "url": "https://huggingface.co/TokenBender/circuit-discovery",
+      "sha": "f75ca2f123ce6aaca0e8096918df1ddb34b5d546"
+    },
+    {
+      "name": "EN-PT generated data and run artifacts",
+      "type": "dataset",
+      "repo": "TokenBender/synth-data-en-pt-circuit",
+      "url": "https://huggingface.co/datasets/TokenBender/synth-data-en-pt-circuit",
+      "sha": "36ee2512bcabf32f224c34792db4fb1907d711c3"
+    },
+    {
+      "name": "EN-PT adapters and masks",
+      "type": "model",
+      "repo": "Occupying-Mars/hy-lora-conditions",
+      "url": "https://huggingface.co/Occupying-Mars/hy-lora-conditions",
+      "sha": "8139bf31538727c87c04f9a88b0b0ccaeacb8832"
+    },
+    {
+      "name": "BFCL data and reproduction artifacts",
+      "type": "dataset",
+      "repo": "Occupying-Mars/issue49-bfcl-repro-artifacts",
+      "url": "https://huggingface.co/datasets/Occupying-Mars/issue49-bfcl-repro-artifacts",
+      "sha": "303db0bddcfb04bebaf07ab4a4dc4c089240c545"
+    },
+    {
+      "name": "BFCL k160 rank-32 adapter",
+      "type": "model",
+      "repo": "Occupying-Mars/issue49-k160-r32-len1024-adapter",
+      "url": "https://huggingface.co/Occupying-Mars/issue49-k160-r32-len1024-adapter",
+      "sha": "e5104eee6e9dd0fff11f377b743330429970d672"
+    },
+    {
+      "name": "BFCL k240 rank-16 adapter",
+      "type": "model",
+      "repo": "Occupying-Mars/issue49-k240-r16-adapter",
+      "url": "https://huggingface.co/Occupying-Mars/issue49-k240-r16-adapter",
+      "sha": "b9018cc3090b856df701240fd73f9f98c627917c"
+    },
+    {
+      "name": "BFCL r32 more-online full-model reproduction",
+      "type": "model",
+      "repo": "TokenBender/issue51-r32-more-online-codex-repro-551-full",
+      "url": "https://huggingface.co/TokenBender/issue51-r32-more-online-codex-repro-551-full",
+      "sha": "ff4daac9e49a8f927153c9a04daa9faba2fb5a66"
+    }
+  ],
+  "claims": [
+    {
+      "claim": "Arithmetic sparse substrate after conditioning",
+      "paper_result": "12,661 MLP channels, 91.33% autoregressive recovery",
+      "included_receipts": [
+        "results/arithmetic/r32_direct_group_rank_merged.json",
+        "results/arithmetic/scale055_transfer_full_answer.json",
+        "results/arithmetic/train_summary.json"
+      ],
+      "code": [
+        "code/train_lora_2digit_kl.py",
+        "code/evaluate_full_answer_masks.py",
+        "code/evaluate_full_answer_generation_masks.py",
+        "code/compress_full_answer_mask.py",
+        "code/evaluate_position_composed_full_answer.py",
+        "code/full_answer_group_search.py",
+        "code/position_interface_decomposition.py",
+        "code/src/circuit_tracing/"
+      ],
+      "external_artifacts": [
+        "TokenBender/circuit-discovery dataset",
+        "TokenBender/circuit-discovery model"
+      ],
+      "artifact_status": "complete"
+    },
+    {
+      "claim": "Translation broad-substrate rescue",
+      "paper_result": "rank-32 conservative floor at k120; rank-8 k160 rescue summary included in paper",
+      "included_receipts": [
+        "results/translation/summary.md",
+        "results/translation/summary_issue24.json"
+      ],
+      "code": [
+        "code/train_masked_kl_conditioning.py",
+        "code/attribute_translation_sentence_aligned.py",
+        "code/evaluate_translation_adapter_masks.py",
+        "code/evaluate_translation_masks.py",
+        "code/build_ntrex_en2pt_jsonl.py"
+      ],
+      "external_artifacts": [
+        "TokenBender/synth-data-en-pt-circuit",
+        "Occupying-Mars/hy-lora-conditions"
+      ],
+      "artifact_status": "complete"
+    },
+    {
+      "claim": "Function calling improves at fixed k160 substrate",
+      "paper_result": "k160: 562/1007 normalized exact; 84.6% recovery at fixed substrate",
+      "included_receipts": [
+        "results/bfcl/eval_masked_summary.json",
+        "results/bfcl/eval_unmasked_summary.json",
+        "results/bfcl/gkd_aopd_hybrid_k160_v0__eval_k160_hybrid_v0_masked.summary.json",
+        "results/bfcl/r32_more_online_repro_summary.json"
+      ],
+      "code": [
+        "code/scripts/bfcl_direct_qwen3.py",
+        "code/scripts/train_bfcl_masked_lora.py",
+        "code/scripts/train_bfcl_prime_opd_sampled_lora.py",
+        "code/scripts/build_bfcl_failure_buckets.py"
+      ],
+      "external_artifacts": [
+        "Occupying-Mars/issue49-bfcl-repro-artifacts",
+        "Occupying-Mars/issue49-k160-r32-len1024-adapter",
+        "TokenBender/issue51-r32-more-online-codex-repro-551-full"
+      ],
+      "artifact_status": "complete"
+    },
+    {
+      "claim": "Function calling k240 policy distillation reaches 568/1007",
+      "paper_result": "568/1007 normalized exact",
+      "included_receipts": [
+        "results/bfcl/README.md"
+      ],
+      "code": [
+        "code/scripts/train_bfcl_masked_policy_distill.py",
+        "code/scripts/bfcl_direct_qwen3.py"
+      ],
+      "external_artifacts": [
+        "Occupying-Mars/issue49-bfcl-repro-artifacts",
+        "Occupying-Mars/issue49-k240-r16-adapter"
+      ],
+      "artifact_status": "complete"
+    }
+  ],
+  "public_sources": "docs/PUBLIC_DATA_SOURCES.md",
+  "release_boundary_doc": "docs/RELEASE_BOUNDARY.md",
+  "release_hygiene_doc": "docs/RELEASE_HYGIENE.md"
+}

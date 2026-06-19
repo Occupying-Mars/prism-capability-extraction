@@ -1,0 +1,9 @@
+# downloaded weights/masks live on the pod + HF, never in git
+artifacts/
+.staging/
+.venv/
+out/
+*.npz
+!substrate_meta/*.json
+download.log
+__pycache__/

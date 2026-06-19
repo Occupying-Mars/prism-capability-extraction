@@ -1,0 +1,88 @@
+{
+  "80": {
+    "threshold_count": 532,
+    "hit_count": 22,
+    "smallest_hit": {
+      "candidate_id": "category_repair_java_r500_protect_tail_b131375_p10000",
+      "kind": "repaired_mask_protected_tail_shrink",
+      "mask_path": "candidate_masks/category_repair_java_r500_protect_tail_b131375_p10000.npz",
+      "selected_mlp_channels": 131375,
+      "mlp_fraction": 0.29698124638310186,
+      "topk_for_eval": 131375,
+      "selected_sha1": "3e3cef61c593a9e4d1dcee30187d0700b8a3c77c",
+      "lineage": {
+        "budget": 131375,
+        "base_candidate_id": "category_repair_java_r500",
+        "base_topk": 141375,
+        "removed_channels": 10000,
+        "protected_tail": 10000,
+        "prefix_kept": 121375,
+        "middle_drop_start": 121375,
+        "middle_drop_end": 131375
+      },
+      "score": 558,
+      "examples": 1007,
+      "accuracy": 0.5541211519364448,
+      "recovery_vs_full_anchor": 0.8403614457831325
+    }
+  },
+  "85": {
+    "threshold_count": 565,
+    "hit_count": 21,
+    "smallest_hit": {
+      "candidate_id": "category_repair_java_r500_protect_tail_b136375_p10000",
+      "kind": "repaired_mask_protected_tail_shrink",
+      "mask_path": "candidate_masks/category_repair_java_r500_protect_tail_b136375_p10000.npz",
+      "selected_mlp_channels": 136375,
+      "mlp_fraction": 0.3082840530960648,
+      "topk_for_eval": 136375,
+      "selected_sha1": "388e555327c3a205fb633ed5b40bdb68a4c75eb1",
+      "lineage": {
+        "budget": 136375,
+        "base_candidate_id": "category_repair_java_r500",
+        "base_topk": 141375,
+        "removed_channels": 5000,
+        "protected_tail": 10000,
+        "prefix_kept": 126375,
+        "middle_drop_start": 126375,
+        "middle_drop_end": 131375
+      },
+      "score": 582,
+      "examples": 1007,
+      "accuracy": 0.5779543197616683,
+      "recovery_vs_full_anchor": 0.8765060240963856
+    }
+  },
+  "90": {
+    "threshold_count": 598,
+    "hit_count": 10,
+    "smallest_hit": {
+      "candidate_id": "category_repair_java_r500_protect_tail_b140875_p10000",
+      "kind": "repaired_mask_protected_tail_shrink",
+      "mask_path": "candidate_masks/category_repair_java_r500_protect_tail_b140875_p10000.npz",
+      "selected_mlp_channels": 140875,
+      "mlp_fraction": 0.31845657913773145,
+      "topk_for_eval": 140875,
+      "selected_sha1": "7492d1944be3320c59a49eaf2b57189badd3524a",
+      "lineage": {
+        "budget": 140875,
+        "base_candidate_id": "category_repair_java_r500",
+        "base_topk": 141375,
+        "removed_channels": 500,
+        "protected_tail": 10000,
+        "prefix_kept": 130875,
+        "middle_drop_start": 130875,
+        "middle_drop_end": 131375
+      },
+      "score": 600,
+      "examples": 1007,
+      "accuracy": 0.5958291956305859,
+      "recovery_vs_full_anchor": 0.9036144578313253
+    }
+  },
+  "95": {
+    "threshold_count": 631,
+    "hit_count": 0,
+    "smallest_hit": null
+  }
+}

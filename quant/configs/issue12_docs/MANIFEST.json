@@ -1,0 +1,45 @@
+{
+  "artifact_name": "issue12_recursive_coactivation_mace_v1",
+  "created_utc": "2026-06-14T19:41:11Z",
+  "source_repo": "/workspace/tokenbender-prism",
+  "git_commit": "07b46cdd41648dd83fbe8180752085bd59adafb5",
+  "git_branch": "issue12-recursive-coactivation-mace",
+  "git_status_short": "?? artifacts/\n?? data/",
+  "github_issue": "https://github.com/tokenbender/prism-capability-extraction/issues/12",
+  "issue_checkpoint_comment": "https://github.com/tokenbender/prism-capability-extraction/issues/12#issuecomment-4702835490",
+  "full_anchor": "664/1007",
+  "mace90_threshold": "598/1007",
+  "total_mlp_channels": 442368,
+  "best_v13_score": {
+    "candidate_id": "category_repair_java_r500_protect_tail_b141250_p250",
+    "k": 141250,
+    "score": 607,
+    "recovery_vs_full_anchor": 0.9141566265060241,
+    "mlp_fraction": 0.3193042896412037
+  },
+  "smallest_confirmed_v13_mace90": {
+    "candidate_id": "category_repair_java_r500_protect_tail_b140875_p10000",
+    "k": 140875,
+    "score": 600,
+    "recovery_vs_full_anchor": 0.9036144578313253,
+    "mlp_fraction": 0.31845657913773145
+  },
+  "smallest_confirmed_v13_mace90_tie": {
+    "candidate_id": "category_repair_java_r500_protect_tail_b140875_p250",
+    "k": 140875,
+    "score": 600,
+    "recovery_vs_full_anchor": 0.9036144578313253,
+    "mlp_fraction": 0.31845657913773145
+  },
+  "label": "compressed/non-uniform MACE-90 incumbent; not clean MACE-90 because category floors fail java/javascript/live_simple",
+  "adapter_dependency": "artifacts/hf/bfcl/issue6_tree_search_v1/run/branches/b007/unmasked_r32/adapter",
+  "atlas_dependency": "artifacts/hf/bfcl/issue9_mlp_activation_atlas_v1/query_manifest_with_failure_metadata.jsonl plus issue9 activation atlas artifacts",
+  "no_additional_issue12_sft": true,
+  "included_roots": [
+    "runs/issue12_recursive_coactivation_mace",
+    "data/bfcl_single_call",
+    "code/scripts",
+    "docs"
+  ],
+  "excluded": "base model caches, HF cache, Python caches, merged checkpoint caches, wandb/cache directories, unrelated repo-local untracked material"
+}

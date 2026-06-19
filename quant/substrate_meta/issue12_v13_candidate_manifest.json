@@ -1,0 +1,52 @@
+{
+  "issue": 12,
+  "artifact": "bfcl_issue12_shrink_repair_candidates",
+  "n_layers": 36,
+  "d_ffn": 12288,
+  "total_mlp_channels": 442368,
+  "inputs": {
+    "base_mask": "runs/issue12_recursive_coactivation_mace/targeted_repair_v12_from_141375_p12000_rebuild_tf4576/candidate_masks/category_repair_java_r500.npz",
+    "base_mask_sha256": "129e2edb4545d2e4743d45ec45a4af923a17c106bef6c2882079da2ee688fe50",
+    "base_candidate_id": "category_repair_java_r500",
+    "base_candidate_jsonl": "runs/issue12_recursive_coactivation_mace/targeted_repair_v12_from_141375_p12000_rebuild_tf4576/candidate_masks.jsonl",
+    "base_lineage": {
+      "candidate_id": "category_repair_java_r500",
+      "kind": "category_floor_specific_repair",
+      "mask_path": "candidate_masks/category_repair_java_r500.npz",
+      "selected_mlp_channels": 141375,
+      "mlp_fraction": 0.3195868598090278,
+      "topk_for_eval": 141375,
+      "selected_sha1": "3da84e3d45077ebc1c4b5fdf847dc40af2d6da8d",
+      "lineage": {
+        "donor": "category_specific_pressure",
+        "category": "java",
+        "replace": 500,
+        "base_topk": 141375
+      }
+    }
+  },
+  "build_params": {
+    "base_topk": 141375,
+    "budgets": [
+      141250,
+      141125,
+      141000,
+      140875,
+      140375,
+      139375,
+      136375,
+      131375
+    ],
+    "protect_tail_counts": [
+      0,
+      125,
+      250,
+      500,
+      1000,
+      2000,
+      5000,
+      10000
+    ]
+  },
+  "candidate_count": 64
+}
