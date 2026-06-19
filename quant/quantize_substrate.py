@@ -73,6 +73,9 @@ def _fqn_in_target(fqn: str, target: str) -> bool:
     return any(tok in fqn for tok in TARGET_MODULES[target])
 
 
+_GPTQ_KEEPALIVE = []  # holds GPTQModel wrappers so they aren't GC'd (not nn submodules)
+
+
 def build_quantized_base(method: str, model_name: str, dtype_str: str, target: str, gptq_path=None):
     import torch
     from transformers import AutoModelForCausalLM
@@ -84,12 +87,17 @@ def build_quantized_base(method: str, model_name: str, dtype_str: str, target: s
 
     if method == "gptq":
         # full-model 4-bit GPTQ checkpoint from gptq_quantize.py (calibrated,
-        # leak-gated). transformers loads it via the gptqmodel backend.
+        # leak-gated). Force the Triton backend: Marlin needs nvcc/CUDA_HOME to
+        # JIT-build a C++ kernel (absent here) and lacks sm_120 support; Triton
+        # compiles at runtime, no CUDA toolkit needed -> works on Blackwell.
         if not gptq_path:
             raise ValueError("--method gptq requires --gptq-path")
-        return AutoModelForCausalLM.from_pretrained(
-            str(gptq_path), torch_dtype=dtype, device_map="auto", **common
-        )
+        from gptqmodel import BACKEND, GPTQModel
+
+        gm = GPTQModel.load(str(gptq_path), backend=BACKEND.TRITON, device_map="auto")
+        inner = getattr(gm, "model", gm)
+        _GPTQ_KEEPALIVE.append(gm)  # keep wrapper alive WITHOUT making it a submodule
+        return inner
     if method in ("nf4", "int8"):
         from transformers import BitsAndBytesConfig
 
