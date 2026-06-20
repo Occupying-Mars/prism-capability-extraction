@@ -15,6 +15,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from prism_qwen.runtime.qwen_substrate_stack import (
     PackedGatedMLP,
+    PackedOutputProjection,
     PaddedTritonFullPackedGatedMLP,
     QwenSubstrateLM,
     _parse_triton_mlp_impl,
@@ -48,6 +49,16 @@ def test_packed_gated_mlp_zero_channels_returns_zero() -> None:
     out = mlp(x)
     assert out.shape == x.shape
     assert out.abs().sum() == 0
+
+
+def test_packed_output_projection_matches_dense_zeroed_channels() -> None:
+    torch.manual_seed(7)
+    dense = torch.nn.Linear(8, 5, bias=False)
+    keep = torch.tensor([True, False, True, False, False, True, True, False])
+    packed = PackedOutputProjection.from_dense(dense, keep)
+    x = torch.randn(2, 3, 8)
+    expected = dense(torch.where(keep.view(1, 1, -1), x, torch.zeros_like(x)))
+    torch.testing.assert_close(packed(x), expected, atol=1e-6, rtol=1e-6)
 
 
 def test_padded_triton_gate_up_layout_uses_padded_up_offset() -> None:

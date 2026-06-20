@@ -1122,6 +1122,82 @@ class QwenLayer(nn.Module):
         return x, next_cache
 
 
+class PackedOutputProjection(nn.Module):
+    """Output projection sliced to kept OV channels."""
+
+    def __init__(
+        self,
+        in_features_full: int,
+        out_features: int,
+        keep_idx: torch.Tensor,
+        *,
+        bias: bool = False,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.in_features_full = int(in_features_full)
+        self.out_features = int(out_features)
+        keep_idx = keep_idx.to(device=device, dtype=torch.long)
+        self.register_buffer("keep_idx", keep_idx)
+        self.weight = nn.Parameter(torch.empty((out_features, keep_idx.numel()), device=device, dtype=dtype))
+        self.bias = nn.Parameter(torch.empty(out_features, device=device, dtype=dtype)) if bias else None
+
+    @classmethod
+    def from_dense(cls, original: nn.Linear, keep: torch.Tensor) -> "PackedOutputProjection":
+        keep_idx = torch.where(keep.to(device=original.weight.device))[0]
+        packed = cls(
+            original.in_features,
+            original.out_features,
+            keep_idx,
+            bias=original.bias is not None,
+            device=original.weight.device,
+            dtype=original.weight.dtype,
+        )
+        with torch.no_grad():
+            packed.weight.copy_(original.weight.index_select(1, keep_idx))
+            if original.bias is not None and packed.bias is not None:
+                packed.bias.copy_(original.bias)
+        return packed
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.keep_idx.numel() == 0:
+            out_shape = (*x.shape[:-1], self.out_features)
+            out = x.new_zeros(out_shape)
+            if self.bias is not None:
+                out = out + self.bias.to(device=x.device, dtype=x.dtype)
+            return out
+        return F.linear(x.index_select(-1, self.keep_idx), self.weight, self.bias)
+
+
+def install_packed_ov_projections(model: "QwenSubstrateLM", keep: torch.Tensor) -> dict[str, int | float | str | dict[str, int]]:
+    expected = (len(model.layers), model.cfg.num_attention_heads * model.cfg.head_dim)
+    if tuple(keep.shape) != expected:
+        raise ValueError(f"attention keep shape {tuple(keep.shape)} != expected {expected}")
+
+    kept_per_layer: dict[str, int] = {}
+    packed_layers = 0
+    for layer_idx, layer in enumerate(model.layers):
+        layer_keep = keep[layer_idx].to(dtype=torch.bool)
+        kept = int(layer_keep.sum().item())
+        kept_per_layer[str(layer_idx)] = kept
+        if kept == expected[1]:
+            continue
+        layer.o_proj = PackedOutputProjection.from_dense(layer.o_proj, layer_keep)
+        packed_layers += 1
+
+    kept_total = int(sum(kept_per_layer.values()))
+    total = int(keep.numel())
+    return {
+        "mode": "packed_ov_output_projection",
+        "packed_layers": packed_layers,
+        "kept_ov_channels": kept_total,
+        "total_ov_channels": total,
+        "ov_keep_fraction": kept_total / max(total, 1),
+        "kept_per_layer": kept_per_layer,
+    }
+
+
 def build_sdpa_mask(
     attention_mask: torch.Tensor,
     q_len: int,

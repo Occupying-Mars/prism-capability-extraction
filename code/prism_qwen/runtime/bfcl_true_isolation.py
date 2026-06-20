@@ -534,8 +534,10 @@ def eval_substrate_bundle(args: argparse.Namespace) -> None:
 def eval_custom_stack(args: argparse.Namespace) -> None:
     from transformers import AutoTokenizer
 
+    from scripts.bfcl_attention_qwen3 import load_attention_scores, make_keep_mask
     from prism_qwen.runtime.qwen_substrate_stack import (
         QwenSubstrateLM,
+        install_packed_ov_projections,
         manual_greedy_generate_custom,
         maybe_compile_mlp,
     )
@@ -558,6 +560,27 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
     )
     if args.compile_mlp:
         maybe_compile_mlp(model)
+
+    attention_summary: dict[str, Any] | None = None
+    if args.attention_attribution is not None:
+        if args.attention_topk is None:
+            raise ValueError("--attention-topk is required with --attention-attribution")
+        head_scores, ov_scores = load_attention_scores(args.attention_attribution)
+        attention_keep, attention_info = make_keep_mask(
+            head_scores=head_scores,
+            ov_scores=ov_scores,
+            unit="ov",
+            topk=args.attention_topk,
+            random_seed=None,
+            mask_strategy=args.attention_mask_strategy,
+            layer_floor=args.attention_layer_floor,
+            head_scaffold_topk=args.attention_head_scaffold_topk,
+            head_scaffold_layer_floor=args.attention_head_scaffold_layer_floor,
+            head_scaffold_multiplier=args.attention_head_scaffold_multiplier,
+        )
+        attention_summary = install_packed_ov_projections(model, attention_keep)
+        attention_summary["attribution"] = str(args.attention_attribution)
+        attention_summary["mask"] = attention_info
 
     out_rows = []
     input_device = first_param_device(model)
@@ -616,7 +639,7 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
         out_rows,
         {
             "mode": "custom_qwen_substrate_stack",
-            "attention": "custom sdpa full attention",
+            "attention": attention_summary or "custom sdpa full attention",
             "mlp": "packed gate/up reduced gated mlp",
             "mlp_impl": args.mlp_impl,
             "compile_mlp": args.compile_mlp,
@@ -873,6 +896,17 @@ def main() -> None:
     p.add_argument("--enable-thinking", action="store_true")
     p.add_argument("--bfcl-canonicalization-prompt", action="store_true")
     p.add_argument("--normalized", action="store_true")
+    p.add_argument("--attention-attribution", type=Path)
+    p.add_argument("--attention-topk", type=int)
+    p.add_argument(
+        "--attention-mask-strategy",
+        choices=["global", "layer-balanced", "head-scaffold-ov"],
+        default="global",
+    )
+    p.add_argument("--attention-layer-floor", type=int, default=0)
+    p.add_argument("--attention-head-scaffold-topk", type=int)
+    p.add_argument("--attention-head-scaffold-layer-floor", type=int, default=0)
+    p.add_argument("--attention-head-scaffold-multiplier", type=float, default=2.0)
     p.set_defaults(func=eval_custom_stack)
 
     p = sub.add_parser("inspect-substrate")
