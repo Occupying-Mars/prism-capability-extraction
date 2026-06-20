@@ -537,7 +537,7 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
     from scripts.bfcl_attention_qwen3 import load_attention_scores, make_keep_mask
     from prism_qwen.runtime.qwen_substrate_stack import (
         QwenSubstrateLM,
-        install_packed_ov_projections,
+        install_head_sparse_attention,
         manual_greedy_generate_custom,
         maybe_compile_mlp,
     )
@@ -578,7 +578,7 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
             head_scaffold_layer_floor=args.attention_head_scaffold_layer_floor,
             head_scaffold_multiplier=args.attention_head_scaffold_multiplier,
         )
-        attention_summary = install_packed_ov_projections(model, attention_keep)
+        attention_summary = install_head_sparse_attention(model, attention_keep)
         attention_summary["attribution"] = str(args.attention_attribution)
         attention_summary["mask"] = attention_info
 

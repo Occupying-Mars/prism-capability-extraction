@@ -17,8 +17,11 @@ from prism_qwen.runtime.qwen_substrate_stack import (
     PackedGatedMLP,
     PackedOutputProjection,
     PaddedTritonFullPackedGatedMLP,
+    QwenSubstrateConfig,
     QwenSubstrateLM,
     _parse_triton_mlp_impl,
+    install_head_sparse_attention,
+    install_packed_ov_projections,
     maybe_compile_mlp,
     triton,
 )
@@ -59,6 +62,55 @@ def test_packed_output_projection_matches_dense_zeroed_channels() -> None:
     x = torch.randn(2, 3, 8)
     expected = dense(torch.where(keep.view(1, 1, -1), x, torch.zeros_like(x)))
     torch.testing.assert_close(packed(x), expected, atol=1e-6, rtol=1e-6)
+
+
+def test_head_sparse_attention_matches_dense_zeroed_ov() -> None:
+    torch.manual_seed(11)
+    cfg = QwenSubstrateConfig(
+        hidden_size=16,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=4,
+        rms_norm_eps=1e-6,
+        vocab_size=23,
+        rope_theta=10000.0,
+    )
+    dense = QwenSubstrateLM(cfg, [5, 4])
+    sparse = QwenSubstrateLM(cfg, [5, 4])
+    sparse.load_state_dict(dense.state_dict())
+
+    keep = torch.zeros((cfg.num_hidden_layers, cfg.hidden_size), dtype=torch.bool)
+    keep[0, 0:4] = True
+    keep[0, 8:10] = True
+    keep[1, 0:8] = True
+
+    dense_summary = install_packed_ov_projections(dense, keep)
+    sparse_summary = install_head_sparse_attention(sparse, keep)
+    assert dense_summary["kept_ov_channels"] == sparse_summary["kept_ov_channels"]
+    assert sparse_summary["active_q_heads"] == 4
+    assert sparse_summary["active_kv_groups"] == 3
+    assert sparse.layers[1].cache_kv_heads == 1
+
+    input_ids = torch.tensor([[1, 2, 3, 4, 5], [5, 4, 3, 2, 1]])
+    attention_mask = torch.ones_like(input_ids)
+    position_ids = torch.arange(input_ids.shape[1]).expand_as(input_ids)
+
+    with torch.no_grad():
+        dense_logits, _ = dense(input_ids, attention_mask, position_ids)
+        sparse_logits, _ = sparse(input_ids, attention_mask, position_ids)
+        past = sparse.init_cache(input_ids.shape[0], max_length=input_ids.shape[1], device=torch.device("cpu"))
+        _, past = sparse(input_ids[:, :4], attention_mask[:, :4], position_ids[:, :4], past, cache_position=0)
+        sparse_decode_logits, _ = sparse(
+            input_ids[:, 4:],
+            attention_mask,
+            position_ids[:, 4:],
+            past,
+            cache_position=4,
+        )
+
+    torch.testing.assert_close(sparse_logits, dense_logits, atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(sparse_decode_logits[:, -1], sparse_logits[:, -1], atol=1e-5, rtol=1e-5)
 
 
 def test_padded_triton_gate_up_layout_uses_padded_up_offset() -> None:

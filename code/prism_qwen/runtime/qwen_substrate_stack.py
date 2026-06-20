@@ -979,6 +979,10 @@ class QwenLayer(nn.Module):
         self.k_norm = RMSNorm(cfg.head_dim, cfg.rms_norm_eps)
         self.input_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(cfg.hidden_size, cfg.rms_norm_eps)
+        self.head_sparse_attention = False
+        self.register_buffer("active_q_heads", torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("active_kv_heads", torch.empty(0, dtype=torch.long), persistent=False)
+        self.register_buffer("active_q_kv_positions", torch.empty(0, dtype=torch.long), persistent=False)
         if mlp_impl == "packed-module":
             self.mlp = PackedGatedMLP(cfg.hidden_size, intermediate_size, mlp_padding_multiple)
         elif mlp_impl == "packed-functional":
@@ -1071,6 +1075,23 @@ class QwenLayer(nn.Module):
         else:
             raise ValueError(f"unknown mlp implementation: {mlp_impl}")
 
+    def set_head_sparse_attention(
+        self,
+        active_q_heads: torch.Tensor,
+        active_kv_heads: torch.Tensor,
+        active_q_kv_positions: torch.Tensor,
+    ) -> None:
+        self.head_sparse_attention = True
+        self.active_q_heads = active_q_heads.to(dtype=torch.long)
+        self.active_kv_heads = active_kv_heads.to(dtype=torch.long)
+        self.active_q_kv_positions = active_q_kv_positions.to(dtype=torch.long)
+
+    @property
+    def cache_kv_heads(self) -> int:
+        if self.head_sparse_attention:
+            return int(self.active_kv_heads.numel())
+        return self.cfg.num_key_value_heads
+
     def forward(
         self,
         x: torch.Tensor,
@@ -1083,13 +1104,40 @@ class QwenLayer(nn.Module):
         residual = x
         x = self.input_layernorm(x)
         bsz, q_len, _ = x.shape
-        q = self.q_norm(self.q_proj(x).view(bsz, q_len, self.cfg.num_attention_heads, self.cfg.head_dim)).transpose(
-            1, 2
-        )
-        k = self.k_norm(self.k_proj(x).view(bsz, q_len, self.cfg.num_key_value_heads, self.cfg.head_dim)).transpose(
-            1, 2
-        )
-        v = self.v_proj(x).view(bsz, q_len, self.cfg.num_key_value_heads, self.cfg.head_dim).transpose(1, 2)
+        if self.head_sparse_attention:
+            active_q = int(self.active_q_heads.numel())
+            active_kv = int(self.active_kv_heads.numel())
+        else:
+            active_q = self.cfg.num_attention_heads
+            active_kv = self.cfg.num_key_value_heads
+
+        if active_q == 0:
+            if cache is None:
+                empty = x.new_empty((bsz, 0, q_len, self.cfg.head_dim))
+                next_cache = (empty, empty)
+            else:
+                next_cache = cache
+            attn = x.new_zeros((bsz, q_len, self.cfg.hidden_size))
+            x = residual + self.o_proj(attn)
+            residual = x
+            if hasattr(self.mlp, "forward_post_norm_residual"):
+                x = self.mlp.forward_post_norm_residual(
+                    x,
+                    self.post_attention_layernorm.weight,
+                    self.cfg.rms_norm_eps,
+                    residual,
+                )
+            else:
+                x = self.post_attention_layernorm(x)
+                if hasattr(self.mlp, "forward_residual"):
+                    x = self.mlp.forward_residual(x, residual)
+                else:
+                    x = residual + self.mlp(x)
+            return x, next_cache
+
+        q = self.q_norm(self.q_proj(x).view(bsz, q_len, active_q, self.cfg.head_dim)).transpose(1, 2)
+        k = self.k_norm(self.k_proj(x).view(bsz, q_len, active_kv, self.cfg.head_dim)).transpose(1, 2)
+        v = self.v_proj(x).view(bsz, q_len, active_kv, self.cfg.head_dim).transpose(1, 2)
         q, k = apply_rope(q, k, cos, sin)
         if cache is not None:
             cache_k, cache_v = cache
@@ -1100,10 +1148,21 @@ class QwenLayer(nn.Module):
             next_cache = cache
         else:
             next_cache = (k, v)
-        k_full = repeat_kv(k, self.cfg.num_attention_heads // self.cfg.num_key_value_heads)
-        v_full = repeat_kv(v, self.cfg.num_attention_heads // self.cfg.num_key_value_heads)
+        if self.head_sparse_attention:
+            kv_positions = self.active_q_kv_positions.to(device=k.device)
+            k_full = k.index_select(1, kv_positions)
+            v_full = v.index_select(1, kv_positions)
+        else:
+            k_full = repeat_kv(k, self.cfg.num_attention_heads // self.cfg.num_key_value_heads)
+            v_full = repeat_kv(v, self.cfg.num_attention_heads // self.cfg.num_key_value_heads)
         attn = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attention_mask, dropout_p=0.0)
-        attn = attn.transpose(1, 2).contiguous().view(bsz, q_len, self.cfg.hidden_size)
+        attn = attn.transpose(1, 2).contiguous()
+        if self.head_sparse_attention:
+            full_attn = attn.new_zeros((bsz, q_len, self.cfg.num_attention_heads, self.cfg.head_dim))
+            full_attn.index_copy_(2, self.active_q_heads.to(device=attn.device), attn)
+            attn = full_attn.view(bsz, q_len, self.cfg.hidden_size)
+        else:
+            attn = attn.view(bsz, q_len, self.cfg.hidden_size)
         x = residual + self.o_proj(attn)
         residual = x
         if hasattr(self.mlp, "forward_post_norm_residual"):
@@ -1170,6 +1229,53 @@ class PackedOutputProjection(nn.Module):
         return F.linear(x.index_select(-1, self.keep_idx), self.weight, self.bias)
 
 
+class PackedInputProjection(nn.Module):
+    """Input projection sliced to selected output rows."""
+
+    def __init__(
+        self,
+        in_features: int,
+        keep_idx: torch.Tensor,
+        *,
+        bias: bool = False,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.in_features = int(in_features)
+        keep_idx = keep_idx.to(device=device, dtype=torch.long)
+        self.register_buffer("keep_idx", keep_idx)
+        self.weight = nn.Parameter(torch.empty((keep_idx.numel(), in_features), device=device, dtype=dtype))
+        self.bias = nn.Parameter(torch.empty(keep_idx.numel(), device=device, dtype=dtype)) if bias else None
+
+    @classmethod
+    def from_dense_rows(cls, original: nn.Linear, keep_idx: torch.Tensor) -> "PackedInputProjection":
+        keep_idx = keep_idx.to(device=original.weight.device, dtype=torch.long)
+        packed = cls(
+            original.in_features,
+            keep_idx,
+            bias=original.bias is not None,
+            device=original.weight.device,
+            dtype=original.weight.dtype,
+        )
+        with torch.no_grad():
+            packed.weight.copy_(original.weight.index_select(0, keep_idx))
+            if original.bias is not None and packed.bias is not None:
+                packed.bias.copy_(original.bias.index_select(0, keep_idx))
+        return packed
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.keep_idx.numel() == 0:
+            return x.new_zeros((*x.shape[:-1], 0))
+        return F.linear(x, self.weight, self.bias)
+
+
+def head_keep_to_row_indices(head_keep: torch.Tensor, head_dim: int) -> torch.Tensor:
+    heads = head_keep.numel()
+    rows = torch.arange(heads * head_dim, device=head_keep.device, dtype=torch.long).view(heads, head_dim)
+    return rows[head_keep].reshape(-1)
+
+
 def install_packed_ov_projections(model: "QwenSubstrateLM", keep: torch.Tensor) -> dict[str, int | float | str | dict[str, int]]:
     expected = (len(model.layers), model.cfg.num_attention_heads * model.cfg.head_dim)
     if tuple(keep.shape) != expected:
@@ -1195,6 +1301,73 @@ def install_packed_ov_projections(model: "QwenSubstrateLM", keep: torch.Tensor) 
         "total_ov_channels": total,
         "ov_keep_fraction": kept_total / max(total, 1),
         "kept_per_layer": kept_per_layer,
+    }
+
+
+def install_head_sparse_attention(model: "QwenSubstrateLM", keep: torch.Tensor) -> dict[str, int | float | str | dict[str, int]]:
+    expected = (len(model.layers), model.cfg.num_attention_heads * model.cfg.head_dim)
+    if tuple(keep.shape) != expected:
+        raise ValueError(f"attention keep shape {tuple(keep.shape)} != expected {expected}")
+    if model.cfg.num_attention_heads % model.cfg.num_key_value_heads != 0:
+        raise ValueError("head-sparse attention requires an integer q-per-kv ratio")
+
+    ov_summary = install_packed_ov_projections(model, keep)
+    q_per_kv = model.cfg.num_attention_heads // model.cfg.num_key_value_heads
+    active_heads_per_layer: dict[str, int] = {}
+    active_kv_per_layer: dict[str, int] = {}
+    packed_qkv_layers = 0
+
+    for layer_idx, layer in enumerate(model.layers):
+        layer_keep = keep[layer_idx].to(device=layer.q_proj.weight.device, dtype=torch.bool)
+        head_keep = layer_keep.view(model.cfg.num_attention_heads, model.cfg.head_dim).any(dim=1)
+        kv_keep = head_keep.view(model.cfg.num_key_value_heads, q_per_kv).any(dim=1)
+        active_q_heads = torch.where(head_keep)[0]
+        active_kv_heads = torch.where(kv_keep)[0]
+        full_to_compact = torch.full(
+            (model.cfg.num_key_value_heads,),
+            -1,
+            device=active_kv_heads.device,
+            dtype=torch.long,
+        )
+        if active_kv_heads.numel():
+            full_to_compact[active_kv_heads] = torch.arange(active_kv_heads.numel(), device=active_kv_heads.device)
+        active_q_kv_positions = full_to_compact[active_q_heads // q_per_kv]
+
+        q_rows = head_keep_to_row_indices(head_keep, model.cfg.head_dim)
+        kv_rows = head_keep_to_row_indices(kv_keep, model.cfg.head_dim)
+        if q_rows.numel() != layer.q_proj.out_features:
+            layer.q_proj = PackedInputProjection.from_dense_rows(layer.q_proj, q_rows)
+            packed_qkv_layers += 1
+        if kv_rows.numel() != layer.k_proj.out_features:
+            layer.k_proj = PackedInputProjection.from_dense_rows(layer.k_proj, kv_rows)
+            layer.v_proj = PackedInputProjection.from_dense_rows(layer.v_proj, kv_rows)
+
+        layer.set_head_sparse_attention(
+            active_q_heads.to(device=layer.q_proj.weight.device),
+            active_kv_heads.to(device=layer.q_proj.weight.device),
+            active_q_kv_positions.to(device=layer.q_proj.weight.device),
+        )
+        active_heads_per_layer[str(layer_idx)] = int(active_q_heads.numel())
+        active_kv_per_layer[str(layer_idx)] = int(active_kv_heads.numel())
+
+    active_heads = int(sum(active_heads_per_layer.values()))
+    total_heads = int(len(model.layers) * model.cfg.num_attention_heads)
+    active_kv_groups = int(sum(active_kv_per_layer.values()))
+    total_kv_groups = int(len(model.layers) * model.cfg.num_key_value_heads)
+    return {
+        **ov_summary,
+        "mode": "head_sparse_attention_packed_qkv_ov",
+        "packed_qkv_layers": packed_qkv_layers,
+        "active_q_heads": active_heads,
+        "total_q_heads": total_heads,
+        "zero_q_heads": total_heads - active_heads,
+        "q_head_keep_fraction": active_heads / max(total_heads, 1),
+        "active_kv_groups": active_kv_groups,
+        "total_kv_groups": total_kv_groups,
+        "zero_kv_groups": total_kv_groups - active_kv_groups,
+        "kv_group_keep_fraction": active_kv_groups / max(total_kv_groups, 1),
+        "active_q_heads_per_layer": active_heads_per_layer,
+        "active_kv_groups_per_layer": active_kv_per_layer,
     }
 
 
@@ -1354,7 +1527,7 @@ class QwenSubstrateLM(nn.Module):
             (
                 torch.empty(
                     batch_size,
-                    self.cfg.num_key_value_heads,
+                    layer.cache_kv_heads,
                     max_length,
                     self.cfg.head_dim,
                     device=device,
@@ -1362,14 +1535,14 @@ class QwenSubstrateLM(nn.Module):
                 ),
                 torch.empty(
                     batch_size,
-                    self.cfg.num_key_value_heads,
+                    layer.cache_kv_heads,
                     max_length,
                     self.cfg.head_dim,
                     device=device,
                     dtype=dtype,
                 ),
             )
-            for _ in self.layers
+            for layer in self.layers
         ]
 
 
