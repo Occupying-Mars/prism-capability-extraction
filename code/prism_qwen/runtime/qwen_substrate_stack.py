@@ -1117,7 +1117,8 @@ class QwenLayer(nn.Module):
                 next_cache = (empty, empty)
             else:
                 next_cache = cache
-            attn = x.new_zeros((bsz, q_len, self.cfg.hidden_size))
+            attn_width = 0 if self.head_sparse_attention else self.cfg.hidden_size
+            attn = x.new_zeros((bsz, q_len, attn_width))
             x = residual + self.o_proj(attn)
             residual = x
             if hasattr(self.mlp, "forward_post_norm_residual"):
@@ -1158,9 +1159,7 @@ class QwenLayer(nn.Module):
         attn = F.scaled_dot_product_attention(q, k_full, v_full, attn_mask=attention_mask, dropout_p=0.0)
         attn = attn.transpose(1, 2).contiguous()
         if self.head_sparse_attention:
-            full_attn = attn.new_zeros((bsz, q_len, self.cfg.num_attention_heads, self.cfg.head_dim))
-            full_attn.index_copy_(2, self.active_q_heads.to(device=attn.device), attn)
-            attn = full_attn.view(bsz, q_len, self.cfg.hidden_size)
+            attn = attn.view(bsz, q_len, active_q * self.cfg.head_dim)
         else:
             attn = attn.view(bsz, q_len, self.cfg.hidden_size)
         x = residual + self.o_proj(attn)
@@ -1227,6 +1226,79 @@ class PackedOutputProjection(nn.Module):
                 out = out + self.bias.to(device=x.device, dtype=x.dtype)
             return out
         return F.linear(x.index_select(-1, self.keep_idx), self.weight, self.bias)
+
+
+class PackedActiveOutputProjection(nn.Module):
+    """Output projection from compact active-head coordinates."""
+
+    def __init__(
+        self,
+        in_features_full: int,
+        active_in_features: int,
+        out_features: int,
+        active_keep_idx: torch.Tensor,
+        full_keep_idx: torch.Tensor,
+        *,
+        bias: bool = False,
+        device: torch.device | str | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.in_features_full = int(in_features_full)
+        self.active_in_features = int(active_in_features)
+        self.out_features = int(out_features)
+        active_keep_idx = active_keep_idx.to(device=device, dtype=torch.long)
+        full_keep_idx = full_keep_idx.to(device=device, dtype=torch.long)
+        self.register_buffer("active_keep_idx", active_keep_idx)
+        self.register_buffer("full_keep_idx", full_keep_idx)
+        self.weight = nn.Parameter(torch.empty((out_features, active_keep_idx.numel()), device=device, dtype=dtype))
+        self.bias = nn.Parameter(torch.empty(out_features, device=device, dtype=dtype)) if bias else None
+
+    @classmethod
+    def from_dense_active(
+        cls,
+        original: nn.Linear,
+        keep: torch.Tensor,
+        active_q_heads: torch.Tensor,
+        head_dim: int,
+    ) -> "PackedActiveOutputProjection":
+        device = original.weight.device
+        keep_idx = torch.where(keep.to(device=device))[0]
+        active_q_heads = active_q_heads.to(device=device, dtype=torch.long)
+        n_heads = original.in_features // head_dim
+        full_to_compact = torch.full((n_heads,), -1, device=device, dtype=torch.long)
+        if active_q_heads.numel():
+            full_to_compact[active_q_heads] = torch.arange(active_q_heads.numel(), device=device)
+        keep_heads = keep_idx // head_dim
+        keep_offsets = keep_idx % head_dim
+        compact_heads = full_to_compact[keep_heads]
+        if bool((compact_heads < 0).any().item()):
+            raise ValueError("kept OV channel references a head outside the active q scaffold")
+        active_keep_idx = compact_heads * head_dim + keep_offsets
+        packed = cls(
+            original.in_features,
+            int(active_q_heads.numel()) * head_dim,
+            original.out_features,
+            active_keep_idx,
+            keep_idx,
+            bias=original.bias is not None,
+            device=device,
+            dtype=original.weight.dtype,
+        )
+        with torch.no_grad():
+            packed.weight.copy_(original.weight.index_select(1, keep_idx))
+            if original.bias is not None and packed.bias is not None:
+                packed.bias.copy_(original.bias)
+        return packed
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.active_keep_idx.numel() == 0:
+            out_shape = (*x.shape[:-1], self.out_features)
+            out = x.new_zeros(out_shape)
+            if self.bias is not None:
+                out = out + self.bias.to(device=x.device, dtype=x.dtype)
+            return out
+        return F.linear(x.index_select(-1, self.active_keep_idx), self.weight, self.bias)
 
 
 class PackedInputProjection(nn.Module):
@@ -1311,14 +1383,17 @@ def install_head_sparse_attention(model: "QwenSubstrateLM", keep: torch.Tensor) 
     if model.cfg.num_attention_heads % model.cfg.num_key_value_heads != 0:
         raise ValueError("head-sparse attention requires an integer q-per-kv ratio")
 
-    ov_summary = install_packed_ov_projections(model, keep)
     q_per_kv = model.cfg.num_attention_heads // model.cfg.num_key_value_heads
+    kept_per_layer: dict[str, int] = {}
+    packed_layers = 0
     active_heads_per_layer: dict[str, int] = {}
     active_kv_per_layer: dict[str, int] = {}
     packed_qkv_layers = 0
 
     for layer_idx, layer in enumerate(model.layers):
         layer_keep = keep[layer_idx].to(device=layer.q_proj.weight.device, dtype=torch.bool)
+        kept = int(layer_keep.sum().item())
+        kept_per_layer[str(layer_idx)] = kept
         head_keep = layer_keep.view(model.cfg.num_attention_heads, model.cfg.head_dim).any(dim=1)
         kv_keep = head_keep.view(model.cfg.num_key_value_heads, q_per_kv).any(dim=1)
         active_q_heads = torch.where(head_keep)[0]
@@ -1342,6 +1417,14 @@ def install_head_sparse_attention(model: "QwenSubstrateLM", keep: torch.Tensor) 
             layer.k_proj = PackedInputProjection.from_dense_rows(layer.k_proj, kv_rows)
             layer.v_proj = PackedInputProjection.from_dense_rows(layer.v_proj, kv_rows)
 
+        if kept != expected[1]:
+            layer.o_proj = PackedActiveOutputProjection.from_dense_active(
+                layer.o_proj,
+                layer_keep,
+                active_q_heads,
+                model.cfg.head_dim,
+            )
+            packed_layers += 1
         layer.set_head_sparse_attention(
             active_q_heads.to(device=layer.q_proj.weight.device),
             active_kv_heads.to(device=layer.q_proj.weight.device),
@@ -1354,9 +1437,15 @@ def install_head_sparse_attention(model: "QwenSubstrateLM", keep: torch.Tensor) 
     total_heads = int(len(model.layers) * model.cfg.num_attention_heads)
     active_kv_groups = int(sum(active_kv_per_layer.values()))
     total_kv_groups = int(len(model.layers) * model.cfg.num_key_value_heads)
+    kept_total = int(sum(kept_per_layer.values()))
+    total_ov = int(keep.numel())
     return {
-        **ov_summary,
         "mode": "head_sparse_attention_packed_qkv_ov",
+        "packed_layers": packed_layers,
+        "kept_ov_channels": kept_total,
+        "total_ov_channels": total_ov,
+        "ov_keep_fraction": kept_total / max(total_ov, 1),
+        "kept_per_layer": kept_per_layer,
         "packed_qkv_layers": packed_qkv_layers,
         "active_q_heads": active_heads,
         "total_q_heads": total_heads,
