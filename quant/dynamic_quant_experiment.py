@@ -51,7 +51,7 @@ def build_calib(model_id, train_jsonl, nsamples, maxlen):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--scheme", required=True, choices=["W8A8", "FP8_DYNAMIC", "W4A8"])
+    ap.add_argument("--scheme", required=True, choices=["W4A16", "W8A8", "FP8_DYNAMIC", "W4A8"])
     ap.add_argument("--model", required=True, help="dense bf16 substrate dir")
     ap.add_argument("--train", default="data/train_mixed.jsonl", help="leak-gated calib (NOT eval)")
     ap.add_argument("--out", required=True)
@@ -74,6 +74,13 @@ def main():
         recipe = QuantizationModifier(targets="Linear", scheme="FP8_DYNAMIC", ignore=["lm_head"])
         print("[dyn] FP8_DYNAMIC (data-free)", flush=True)
         oneshot(model=model, recipe=recipe)
+    elif args.scheme == "W4A16":
+        # weight-only 4-bit GPTQ (activations stay fp16); no SmoothQuant
+        ds = build_calib(args.model, args.train, args.nsamples, args.maxlen)
+        print(f"[dyn] W4A16 GPTQ: {len(ds)} leak-gated calib rows", flush=True)
+        recipe = GPTQModifier(targets="Linear", scheme="W4A16", ignore=["lm_head"])
+        oneshot(model=model, dataset=ds, recipe=recipe,
+                max_seq_length=args.maxlen, num_calibration_samples=args.nsamples)
     else:
         # W8A8 / W4A8: GPTQ weights (need calib) + per-token dynamic int8 activations
         ds = build_calib(args.model, args.train, args.nsamples, args.maxlen)
