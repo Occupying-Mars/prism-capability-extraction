@@ -19,8 +19,13 @@ EVAL --model "$BASE" --report reports/base_bf16.json
 
 echo "=== [2/5] AutoRound W4 (eval-aware) ==="
 $PY autoround_quantize.py --model "$BASE" --train "$TRAIN" --out out/base-ar-w4 --nsamples 512 --iters 200 --seqlen 256
-ARDIR=$(ls -d out/base-ar-w4/*/ | head -1)
+# AutoRound saves to out/ directly when given a local-dir model (no nested subdir)
+ARDIR=out/base-ar-w4; [ -d "$ARDIR"/*/ ] 2>/dev/null && ARDIR=$(ls -d out/base-ar-w4/*/ | head -1)
 EVAL --model "$ARDIR" --report reports/base_ar_w4.json
+
+# NOTE: stages 3-5 (llm-compressor) need transformers<5 (it breaks on tf 5.12),
+# but the eval/vLLM needs tf 5.12. Run those quants in a separate .venv-quant
+# (transformers<5 + llmcompressor) and eval in the main .venv (vLLM 0.23 + tf 5.12).
 
 echo "=== [3/5] GPTQ W4A16 (control) ==="
 $PY dynamic_quant_experiment.py --scheme W4A16 --model "$BASE" --train "$TRAIN" --out out/base-w4a16
