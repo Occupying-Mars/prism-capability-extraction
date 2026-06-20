@@ -249,7 +249,7 @@ def merge_adapter(args: argparse.Namespace) -> None:
 
         shutil.rmtree(args.output)
 
-    tokenizer = AutoTokenizer.from_pretrained(args.adapter)
+    tokenizer = AutoTokenizer.from_pretrained(args.base_model)
     base = AutoModelForCausalLM.from_pretrained(
         args.base_model,
         torch_dtype=torch_dtype(args.dtype),
