@@ -36,7 +36,8 @@ def main():
     ap.add_argument("--max-new-tokens", type=int, default=512)
     ap.add_argument("--max-model-len", type=int, default=4096)
     ap.add_argument("--gpu-mem", type=float, default=0.85)
-    ap.add_argument("--quantization", default=None, help="force vLLM quant method, e.g. gptq_marlin")
+    ap.add_argument("--quantization", default=None, help="force vLLM quant method, e.g. gptq_marlin, compressed-tensors")
+    ap.add_argument("--enforce-eager", action="store_true", help="disable cudagraph (needed on Blackwell sm_120; leave OFF on A100 for real throughput)")
     ap.add_argument("--smoke", type=int, default=0, help="generate N and print (serving sanity)")
     ap.add_argument("--report", type=Path)
     args = ap.parse_args()
@@ -57,9 +58,9 @@ def main():
         for r in rows
     ]
 
-    # enforce_eager avoids inductor/torch.compile CUDA JIT (no nvcc on this image);
-    # flashinfer sampler/attention are disabled via env (greedy needs neither).
-    llm_kwargs = dict(model=args.model, dtype="bfloat16", enforce_eager=True,
+    # enforce_eager only needed on Blackwell sm_120 (no nvcc for flashinfer/inductor JIT);
+    # on A100 leave it OFF so cudagraph is on and throughput numbers are real.
+    llm_kwargs = dict(model=args.model, dtype="bfloat16", enforce_eager=args.enforce_eager,
                       gpu_memory_utilization=args.gpu_mem, max_model_len=args.max_model_len)
     if args.quantization:
         llm_kwargs["quantization"] = args.quantization
@@ -72,10 +73,15 @@ def main():
             print("--- SMOKE ---\n" + o.outputs[0].text[:300], flush=True)
         return
 
+    import time
+
+    t0 = time.time()
     outs = llm.generate(prompts, sp)
-    judged = norm = raw = 0
+    elapsed = time.time() - t0
+    judged = norm = raw = out_tokens = 0
     for row, out in zip(rows, outs):
         text = out.outputs[0].text
+        out_tokens += len(out.outputs[0].token_ids)
         pred = bfcl.parse_tool_calls(text)
         judged += 1
         norm += int(bfcl.normalized_prediction_ok(pred, row))
@@ -83,12 +89,18 @@ def main():
     summary = {
         "model": args.model,
         "serving": "vllm",
+        "quantization": args.quantization or "none",
         "examples": judged,
         "normalized_exact_correct": norm,
         "normalized_exact_accuracy": norm / judged if judged else None,
         "raw_exact_correct": raw,
         "recovery_vs_full_anchor": (norm / 664) if judged == 1007 else None,
         "full_anchor": 664,
+        # throughput (whole batch through vLLM, same prompt set across models)
+        "elapsed_s": round(elapsed, 1),
+        "output_tokens": out_tokens,
+        "requests_per_s": round(judged / elapsed, 2) if elapsed else None,
+        "output_tokens_per_s": round(out_tokens / elapsed, 1) if elapsed else None,
     }
     print(json.dumps(summary, indent=2))
     if args.report:
