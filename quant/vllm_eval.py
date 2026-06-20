@@ -38,6 +38,7 @@ def main():
     ap.add_argument("--gpu-mem", type=float, default=0.85)
     ap.add_argument("--quantization", default=None, help="force vLLM quant method, e.g. gptq_marlin, compressed-tensors")
     ap.add_argument("--enforce-eager", action="store_true", help="disable cudagraph (needed on Blackwell sm_120; leave OFF on A100 for real throughput)")
+    ap.add_argument("--strip-think", action="store_true", help="strip the empty <think></think> block transformers 4.57 injects (match the substrate's eval format)")
     ap.add_argument("--smoke", type=int, default=0, help="generate N and print (serving sanity)")
     ap.add_argument("--report", type=Path)
     args = ap.parse_args()
@@ -49,14 +50,19 @@ def main():
     rows = bfcl.read_records(args.pairs)
     if args.limit:
         rows = rows[: args.limit]
-    prompts = [
+    # Tokenize with apply_chat_template(tokenize=True) and feed vLLM the token IDs
+    # directly. Passing a pre-templated STRING to llm.generate makes vLLM re-tokenize
+    # it (mishandling special tokens on some versions -> wrong prompt, ~-150 score).
+    # Token IDs match the transformers eval path exactly.
+    prompt_ids = [
         tok.apply_chat_template(
             bfcl.messages_for_generation(r, bfcl_canonicalization_prompt=True),
             tools=r.get("tools") or None,
-            add_generation_prompt=True, tokenize=False, enable_thinking=False,
+            add_generation_prompt=True, tokenize=True, enable_thinking=False,
         )
         for r in rows
     ]
+    token_prompts = [{"prompt_token_ids": ids} for ids in prompt_ids]
 
     # enforce_eager only needed on Blackwell sm_120 (no nvcc for flashinfer/inductor JIT);
     # on A100 leave it OFF so cudagraph is on and throughput numbers are real.
@@ -68,7 +74,7 @@ def main():
     sp = SamplingParams(temperature=0.0, max_tokens=args.max_new_tokens)
 
     if args.smoke:
-        outs = llm.generate(prompts[: args.smoke], sp)
+        outs = llm.generate(token_prompts[: args.smoke], sp)
         for o in outs:
             print("--- SMOKE ---\n" + o.outputs[0].text[:300], flush=True)
         return
@@ -76,7 +82,7 @@ def main():
     import time
 
     t0 = time.time()
-    outs = llm.generate(prompts, sp)
+    outs = llm.generate(token_prompts, sp)
     elapsed = time.time() - t0
     judged = norm = raw = out_tokens = 0
     for row, out in zip(rows, outs):
