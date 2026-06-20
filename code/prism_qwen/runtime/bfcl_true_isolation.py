@@ -584,6 +584,7 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
 
     out_rows = []
     input_device = first_param_device(model)
+    eval_started = time.time()
     with torch.inference_mode():
         for start in range(0, len(rows), args.batch_size):
             batch_rows = rows[start : start + args.batch_size]
@@ -633,6 +634,7 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
                 )
             if args.log_every and len(out_rows) % args.log_every == 0:
                 print(f"evaluated {len(out_rows)}/{len(rows)}", flush=True)
+    eval_elapsed = time.time() - eval_started
 
     write_eval_summary(
         args,
@@ -645,7 +647,13 @@ def eval_custom_stack(args: argparse.Namespace) -> None:
             "compile_mlp": args.compile_mlp,
             "mlp_padding_multiple": args.mlp_padding_multiple,
         },
-        extra={"bundle": str(args.bundle)},
+        extra={
+            "bundle": str(args.bundle),
+            "runtime": {
+                "eval_elapsed_sec": eval_elapsed,
+                "examples_per_sec": len(out_rows) / eval_elapsed if eval_elapsed else None,
+            },
+        },
         note="custom qwen substrate runner; tokenizer only uses transformers",
     )
 
