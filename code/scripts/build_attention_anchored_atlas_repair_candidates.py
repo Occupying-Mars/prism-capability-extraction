@@ -331,6 +331,7 @@ def main() -> None:
                 continue
             tail = base_order[-protected_tail:] if protected_tail else []
             for donor_name, donor_order in donor_orders.items():
+                donor_slice = donor_order[:replace]
                 mode_penalty = 0 if donor_name.endswith("target_delta") else 40
                 group_penalty = 0 if donor_name.startswith("failure_weighted") else 10 if donor_name.startswith("balanced") else 20
                 tail_penalty = abs(protected_tail - 12288) // 1024
@@ -339,7 +340,7 @@ def main() -> None:
                 add(
                     f"{family}_b{args.budget}_r{replace}_p{protected_tail}",
                     family,
-                    [base_order[:prefix_count], donor_order, tail],
+                    [base_order[:prefix_count], donor_slice, tail],
                     {
                         "budget": args.budget,
                         "replace": replace,
