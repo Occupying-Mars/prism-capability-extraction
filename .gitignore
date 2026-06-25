@@ -8,3 +8,6 @@ runs/
 *.fdb_latexmk
 *.fls
 *.out
+
+AGENTS.md
+.env
