@@ -1,0 +1,15 @@
+{
+  "model": "out/qwen3-8b-awq-w4",
+  "serving": "vllm",
+  "quantization": "none",
+  "examples": 1007,
+  "normalized_exact_correct": 585,
+  "normalized_exact_accuracy": 0.5809334657398213,
+  "raw_exact_correct": 569,
+  "recovery_vs_full_anchor": 0.8810240963855421,
+  "full_anchor": 664,
+  "elapsed_s": 36.3,
+  "output_tokens": 44544,
+  "requests_per_s": 27.73,
+  "output_tokens_per_s": 1226.5
+}

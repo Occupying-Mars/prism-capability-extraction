@@ -1,0 +1,15 @@
+{
+  "model": "out/qwen3-8b-b007-mace90-dense",
+  "serving": "vllm",
+  "quantization": "none",
+  "examples": 1007,
+  "normalized_exact_correct": 600,
+  "normalized_exact_accuracy": 0.5958291956305859,
+  "raw_exact_correct": 587,
+  "recovery_vs_full_anchor": 0.9036144578313253,
+  "full_anchor": 664,
+  "elapsed_s": 31.4,
+  "output_tokens": 45174,
+  "requests_per_s": 32.06,
+  "output_tokens_per_s": 1438.0
+}
