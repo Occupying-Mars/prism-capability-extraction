@@ -47,7 +47,18 @@ def main() -> None:
     ap.add_argument("--batch-size", type=int, default=16)
     ap.add_argument("--max-new-tokens", type=int, default=256)
     ap.add_argument("--full-anchor", type=int, default=FULL_BFCL_ANCHOR)
+    ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--wandb-project", default="prism-bfcl-attention")
+    ap.add_argument("--wandb-entity", default="krishnapg2315")
+    ap.add_argument("--wandb-name", default="issue6-hybrid-eval")
     args = ap.parse_args()
+
+    wandb_run = None
+    if args.wandb:
+        import wandb
+        wandb_run = wandb.init(project=args.wandb_project, entity=args.wandb_entity,
+                               name=args.wandb_name, job_type="eval",
+                               config={"hybrid_ckpt": str(args.hybrid_ckpt)})
 
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(args.tokenizer or args.model)
@@ -98,6 +109,9 @@ def main() -> None:
                 fails[classify_failure(calls, r)] += 1
         done = min(start + args.batch_size, len(rows))
         print(f"eval {done}/{len(rows)} norm_exact={norm_ok} elapsed_s={time.time()-t0:.0f}", flush=True)
+        if wandb_run is not None:
+            wandb_run.log({"eval/done": done, "eval/normalized_exact": norm_ok,
+                           "eval/running_acc": norm_ok / max(done, 1)}, step=done)
 
     summary = {
         "model": args.model, "hybrid_ckpt": str(args.hybrid_ckpt),
@@ -113,6 +127,13 @@ def main() -> None:
     args.output.write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps({k: summary[k] for k in
                       ("normalized_exact", "recovery_vs_anchor", "failure_buckets")}, indent=2))
+    if wandb_run is not None:
+        wandb_run.summary.update({
+            "normalized_exact": norm_ok, "raw_exact": raw_ok,
+            "recovery_vs_anchor": summary["recovery_vs_anchor"],
+            "retained_heads": summary["retained_heads"],
+            **{f"fail/{k}": v for k, v in summary["failure_buckets"].items()}})
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

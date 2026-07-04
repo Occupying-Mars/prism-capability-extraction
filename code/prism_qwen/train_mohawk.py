@@ -62,25 +62,35 @@ def build_packed(tokenizer, rows, seq_len, device):
 
 
 def hidden_align_loss(student, teacher, batch):
+    """Returns (loss, metrics): mean per-layer MSE + the per-layer breakdown."""
     with torch.no_grad():
         t = teacher(batch, output_hidden_states=True).hidden_states
     s = student(batch, output_hidden_states=True).hidden_states
-    loss = 0.0
-    for si, ti in zip(s[1:], t[1:]):                       # skip embedding layer
-        loss = loss + F.mse_loss(si.float(), ti.float().detach())
-    return loss / (len(s) - 1)
+    per_layer = [F.mse_loss(si.float(), ti.float().detach())
+                 for si, ti in zip(s[1:], t[1:])]          # skip embedding layer
+    loss = torch.stack(per_layer).mean()
+    metrics = {f"align_layer/{i:02d}": float(v) for i, v in enumerate(per_layer)}
+    metrics["align/layer_max"] = max(float(v) for v in per_layer)
+    return loss, metrics
 
 
 def kd_loss(student, teacher, batch, temp=1.0):
+    """Returns (loss, metrics): KL to teacher + student CE on the data separately."""
     with torch.no_grad():
         tl = teacher(batch).logits
     sl = student(batch).logits
     s_logp = F.log_softmax(sl.float() / temp, dim=-1)
     t_p = F.softmax(tl.float() / temp, dim=-1)
-    return F.kl_div(s_logp, t_p, reduction="batchmean") * (temp * temp)
+    kl = F.kl_div(s_logp, t_p, reduction="batchmean") * (temp * temp)
+    with torch.no_grad():
+        ce = F.cross_entropy(sl[:, :-1].float().flatten(0, 1), batch[:, 1:].flatten())
+        t_ce = F.cross_entropy(tl[:, :-1].float().flatten(0, 1), batch[:, 1:].flatten())
+    return kl, {"kd/student_ce": float(ce), "kd/teacher_ce": float(t_ce),
+                "kd/ce_gap": float(ce - t_ce)}
 
 
-def run_stage(name, student, teacher, blocks, loss_fn, *, lr, steps, bs, accum, log_every):
+def run_stage(name, student, teacher, blocks, loss_fn, *, lr, steps, bs, accum, log_every,
+              wandb_run=None, step_offset=0):
     params = [p for p in student.parameters() if p.requires_grad]
     opt = torch.optim.AdamW(params, lr=lr, betas=(0.9, 0.95), weight_decay=0.1)
     student.train()
@@ -90,23 +100,36 @@ def run_stage(name, student, teacher, blocks, loss_fn, *, lr, steps, bs, accum, 
     step = 0
     order = torch.randperm(n)
     ptr = 0
+    seq_len = blocks.shape[1]
+    last_log_t = time.time()
     while step < steps:
         opt.zero_grad(set_to_none=True)
         acc_loss = 0.0
+        extra: dict[str, float] = {}
         for _ in range(accum):
             if ptr + bs > n:
                 order = torch.randperm(n); ptr = 0
             idx = order[ptr: ptr + bs]; ptr += bs
             batch = blocks[idx].to(dev)
-            loss = loss_fn(student, teacher, batch) / accum
-            loss.backward()
-            acc_loss += float(loss)
-        torch.nn.utils.clip_grad_norm_(params, 1.0)
+            out = loss_fn(student, teacher, batch)
+            loss, metrics = out if isinstance(out, tuple) else (out, {})
+            (loss / accum).backward()
+            acc_loss += float(loss) / accum
+            for k, v in metrics.items():                    # keep last micro-batch's metrics
+                extra[k] = v
+        grad_norm = float(torch.nn.utils.clip_grad_norm_(params, 1.0))
         opt.step()
         step += 1
         if step % log_every == 0 or step == steps:
-            print(f"[{name}] step {step}/{steps} loss={acc_loss:.5f} "
-                  f"elapsed_s={time.time()-started:.0f}", flush=True)
+            now = time.time()
+            tok_s = bs * seq_len * accum * min(log_every, step) / max(now - last_log_t, 1e-6)
+            last_log_t = now
+            print(f"[{name}] step {step}/{steps} loss={acc_loss:.5f} grad_norm={grad_norm:.3f} "
+                  f"tok/s={tok_s:.0f} elapsed_s={now-started:.0f}", flush=True)
+            if wandb_run is not None:
+                wandb_run.log({f"{name}/loss": acc_loss, f"{name}/grad_norm": grad_norm,
+                               f"{name}/tokens_per_s": tok_s, f"{name}/step": step,
+                               "lr": lr, **extra}, step=step_offset + step)
     return {"stage": name, "final_loss": acc_loss, "steps": steps, "lr": lr}
 
 
@@ -115,8 +138,10 @@ def main() -> None:
     ap.add_argument("--model", default="/root/models/Qwen3-8B")
     ap.add_argument("--tokenizer")
     ap.add_argument("--scores", type=Path, required=True, help="gaa_ablation_scores.npz")
-    ap.add_argument("--select", default="total", choices=["total", "aggregate", "gather"])
+    ap.add_argument("--select", default="total", choices=["total", "aggregate", "gather", "union"])
     ap.add_argument("--keep-k", type=int, default=40, help="number of retained heads (top-k)")
+    ap.add_argument("--keep-positive", action="store_true",
+                    help="retain ALL heads with positive drop (ignores --keep-k)")
     ap.add_argument("--d-state", type=int, default=64)
     ap.add_argument("--train-jsonl", type=Path, required=True)
     ap.add_argument("--output-dir", type=Path, required=True)
@@ -130,7 +155,18 @@ def main() -> None:
     ap.add_argument("--kd-lr", type=float, default=1e-5)
     ap.add_argument("--log-every", type=int, default=10)
     ap.add_argument("--grad-checkpointing", action="store_true")
+    ap.add_argument("--wandb", action="store_true")
+    ap.add_argument("--wandb-project", default="prism-bfcl-attention")
+    ap.add_argument("--wandb-entity", default="krishnapg2315")
+    ap.add_argument("--wandb-name", default="issue6-hybrid-union-positive")
     args = ap.parse_args()
+
+    wandb_run = None
+    if args.wandb:
+        import wandb
+        wandb_run = wandb.init(
+            project=args.wandb_project, entity=args.wandb_entity, name=args.wandb_name,
+            config={k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()})
 
     dtype = torch.bfloat16
     from transformers import AutoTokenizer
@@ -145,7 +181,8 @@ def main() -> None:
     student = load(args.model, dtype)
 
     n_layers = student.config.num_hidden_layers
-    retained = retained_by_layer_from_scores(args.scores, args.select, args.keep_k, n_layers)
+    retained = retained_by_layer_from_scores(args.scores, args.select, args.keep_k, n_layers,
+                                             positive_only=args.keep_positive)
     n_ret = sum(len(v) for v in retained.values())
     build_hybrid(student, retained, d_state=args.d_state)
     n_train = freeze_except_ssm(student)
@@ -159,14 +196,21 @@ def main() -> None:
         rows = rows[: args.rows]
     blocks = build_packed(tokenizer, rows, args.seq_len, student.device)
 
+    if wandb_run is not None:
+        wandb_run.summary["retained_heads"] = n_ret
+        wandb_run.summary["ssm_trainable_M"] = n_train / 1e6
+        wandb_run.summary["blocks"] = int(blocks.shape[0])
+
     args.output_dir.mkdir(parents=True, exist_ok=True)
     log = []
     log.append(run_stage("align", student, teacher, blocks, hidden_align_loss,
                          lr=args.align_lr, steps=args.align_steps, bs=args.batch_size,
-                         accum=args.accum, log_every=args.log_every))
+                         accum=args.accum, log_every=args.log_every,
+                         wandb_run=wandb_run, step_offset=0))
     log.append(run_stage("kd", student, teacher, blocks, kd_loss,
                          lr=args.kd_lr, steps=args.kd_steps, bs=args.batch_size,
-                         accum=args.accum, log_every=args.log_every))
+                         accum=args.accum, log_every=args.log_every,
+                         wandb_run=wandb_run, step_offset=args.align_steps))
 
     ssm_state = {k: v.cpu() for k, v in student.state_dict().items() if ".ssm." in k}
     torch.save({"ssm_state": ssm_state, "retained": retained, "d_state": args.d_state,
@@ -176,6 +220,8 @@ def main() -> None:
          "d_state": args.d_state, "seq_len": args.seq_len, "blocks": int(blocks.shape[0]),
          "stages": log}, indent=2) + "\n")
     print("saved hybrid_ssm.pt + train_log.json", flush=True)
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 if __name__ == "__main__":

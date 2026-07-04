@@ -220,21 +220,37 @@ def build_hybrid(model, retained_by_layer: dict[int, list[int]], d_state=64):
     return model
 
 
-def retained_by_layer_from_scores(scores_npz: Path, select: str, k: int, n_layers: int) -> dict[int, list[int]]:
-    """Top-k retained heads by a chosen ablation-drop metric.
+def retained_by_layer_from_scores(scores_npz: Path, select: str, k: int, n_layers: int,
+                                  positive_only: bool = False) -> dict[int, list[int]]:
+    """Retained heads by a chosen ablation-drop metric.
 
     select in {"total","aggregate","gather"}. gather is ~noise on BFCL (function
     selection is redundant), so "total" or "aggregate" are the meaningful choices.
+    positive_only=True keeps every head with drop > 0 (all heads that help the
+    capability), ignoring k; otherwise keeps the top-k.
     """
     import numpy as np
     d = np.load(scores_npz)
-    key = {"total": "total_drop", "aggregate": "aggregate_drop", "gather": "gather_drop"}[select]
-    mat = d[key]
-    nh = mat.shape[1]
-    order = np.argsort(mat.flatten())[::-1][:k]
+    if select == "union":
+        t, a = d["total_drop"].flatten(), d["aggregate_drop"].flatten()
+        nh = d["total_drop"].shape[1]
+        if positive_only:
+            idxs = [int(i) for i in np.where((t > 0) | (a > 0))[0]]
+        else:
+            score = np.maximum(t / (t.max() + 1e-9), a / (a.max() + 1e-9))
+            idxs = [int(i) for i in np.argsort(score)[::-1][:k]]
+    else:
+        key = {"total": "total_drop", "aggregate": "aggregate_drop", "gather": "gather_drop"}[select]
+        mat = d[key]
+        nh = mat.shape[1]
+        flat = mat.flatten()
+        if positive_only:
+            idxs = [int(i) for i in np.argsort(flat)[::-1] if flat[int(i)] > 0]
+        else:
+            idxs = [int(i) for i in np.argsort(flat)[::-1][:k]]
     out: dict[int, list[int]] = {i: [] for i in range(n_layers)}
-    for idx in order:
-        out[int(idx) // nh].append(int(idx) % nh)
+    for idx in idxs:
+        out[idx // nh].append(idx % nh)
     return out
 
 
